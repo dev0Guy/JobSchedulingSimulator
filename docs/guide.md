@@ -134,6 +134,7 @@ Write your own by implementing `tick(ctx) f32` (see
 | `viz:delay=80,per_resource=0,on_place=0,jobs=20,cols=100,color=1` | animated terminal view of machines and the waiting pool |
 | `metrics` | wait percentiles, utilization, jobs per machine at episode end |
 | `log:ticks=0` | one line per event on stderr |
+| `trace:path=trace.jsonl,ticks=1` | every event plus each job's demand profile, as JSON Lines — download it and replay / visualize offline (see [python.md](python.md#recording-and-replay)) |
 
 ### Example: compare policies
 

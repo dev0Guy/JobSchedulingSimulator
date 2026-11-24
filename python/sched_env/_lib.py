@@ -84,6 +84,8 @@ def load() -> C.CDLL:
         "sim_duration_ptr": ([P], u16p),
         "sim_arrival_ptr": ([P], C.POINTER(C.c_int64)),
         "sim_now": ([P], C.c_int64),
+        "sim_trace_open": ([P, C.c_char_p], C.c_int),
+        "sim_trace_close": ([P], C.c_int),
         "sim_stats": ([P, C.POINTER(SimStats)], None),
         "sim_policy_action": ([P, C.c_char_p], C.c_int64),
         "sim_run_policy": ([P, C.c_char_p, C.c_uint64, C.POINTER(SimStats)], C.c_int),

@@ -91,6 +91,15 @@ const Sim = struct {
     arr: sched.ports.ArrivalSource,
     eng: sched.Engine,
     started: bool = false,
+    /// Trace file (sim_trace_open); `tracing` says whether it is open.
+    threaded: std.Io.Threaded = undefined,
+    trace: sched.adapters.observers.Trace = .{},
+    tracing: bool = false,
+
+    /// Observer registered once; forwards to the trace while it is open.
+    pub fn onEvent(self: *Sim, ev: sched.Event, st: *const sched.State) void {
+        if (self.tracing) self.trace.onEvent(ev, st);
+    }
 };
 
 const gpa = std.heap.smp_allocator;
@@ -121,6 +130,10 @@ fn create(c: *const SimConfig) !*Sim {
     errdefer sim.eng.deinit();
     if (c.reward) |r| sim.eng.setReward(try registry.reward(a, try cli.Spec.parse(a, "reward", std.mem.span(r))));
     sim.started = false;
+    sim.trace = .{};
+    sim.tracing = false;
+    sim.threaded = std.Io.Threaded.init_single_threaded;
+    try sim.eng.addObserver(.init(sim));
     return sim;
 }
 
@@ -133,6 +146,7 @@ export fn sim_create(cfg: *const SimConfig) ?*Sim {
 
 export fn sim_destroy(sim: ?*Sim) void {
     const s = sim orelse return;
+    _ = sim_trace_close(s);
     s.eng.deinit();
     s.arr.deinit();
     s.gen.deinit();
@@ -217,6 +231,25 @@ export fn sim_duration_ptr(sim: *const Sim) [*]const u16 {
 /// Arrival tick per slot, [max_jobs] i64 (meaningful for valid slots only).
 export fn sim_arrival_ptr(sim: *const Sim) [*]const i64 {
     return sim.eng.jobs.arrival.ptr;
+}
+
+/// Record every following event to a JSON Lines trace at `path` (created or
+/// truncated; see src/adapters/observers/trace.zig for the format). Call
+/// before sim_reset to capture whole episodes. 0 = ok, -1 = cannot create.
+export fn sim_trace_open(sim: *Sim, path: [*:0]const u8) c_int {
+    _ = sim_trace_close(sim);
+    sim.trace = .{};
+    sim.trace.open(sim.threaded.io(), std.Io.Dir.cwd(), std.mem.span(path)) catch return -1;
+    sim.tracing = true;
+    return 0;
+}
+
+/// Flush and close the trace. 0 = ok (or none open), -1 = a write failed.
+export fn sim_trace_close(sim: *Sim) c_int {
+    if (!sim.tracing) return 0;
+    sim.tracing = false;
+    sim.trace.close() catch return -1;
+    return 0;
 }
 
 export fn sim_now(sim: *const Sim) i64 {

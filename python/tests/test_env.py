@@ -103,3 +103,36 @@ def test_reward_specs_and_new_adapters():
     import pytest
     with pytest.raises(ValueError):
         SchedEnv(**{**KW, "reward": "nope"})
+
+
+def test_trace_replay_matches_live_run(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    from sched_env.replay import load_trace
+    from sched_env.viz import animate, record
+
+    kw = {**KW, "jobs": "mmpp:n=40,rate=0.8", "skip_empty": False}
+    env = SchedEnv(**kw)
+    path = tmp_path / "run.jsonl"
+    env.start_trace(str(path))
+    live = record(env, "sjf", seed=5)          # episode 1
+    record(env, "fifo", seed=6)                # episode 2 in the same file
+    env.stop_trace()
+    env.close()
+
+    eps = load_trace(path)
+    assert [e.seed for e in eps] == [5, 6]
+    rep = eps[0].frames
+    assert len(rep) == len(live)
+    for a, b in zip(live, rep):
+        assert a.now == b.now
+        np.testing.assert_allclose(a.used, b.used, atol=1e-6)
+        np.testing.assert_allclose(a.pool, b.pool, atol=1e-6)   # NaN where empty, both sides
+        assert (a.wait == b.wait).all()
+        assert a.placed_now == b.placed_now
+    s, want = eps[0].stats, live[-1].stats
+    for k in ("placed", "arrived", "makespan", "max_wait"):
+        assert s[k] == want[k], k
+    assert abs(s["avg_wait"] - want["avg_wait"]) < 1e-9
+    animate(eps[1], eps[1].frames[:4], str(tmp_path / "r.gif"), fps=10)
+

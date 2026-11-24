@@ -141,6 +141,50 @@ From code: `frames = sched_env.viz.record(env, "sjf", seed=0)` then
 `sched_env.viz.animate(env, frames, "out.gif")`. `record` also accepts a
 callable `(env, obs) -> action`, e.g. a trained model.
 
+### Recording and replay
+
+The `trace` observer writes everything needed to rebuild an episode —
+machine capacities, every arrival with its full demand profile, every
+placement, rejection, illegal action and tick — to a JSON Lines file. The
+file is self-contained: copy or download it and replay it anywhere with
+Python, without the simulator or `libsched`.
+
+```bash
+# record (command line): one file, all episodes
+zig build run -- --machines deeprm:n=1 --jobs poisson:n=60,rate=0.8 --res 2 --ticks 20 \
+    --pool 10 --policy sjf --episodes 3 --observe trace:path=run.jsonl
+
+# replay
+PYTHONPATH=python python python/examples/replay.py run.jsonl --list
+PYTHONPATH=python python python/examples/replay.py run.jsonl --episode 1 --out ep1.gif
+PYTHONPATH=python python python/examples/replay.py run.jsonl --from-tick 40 --to-tick 80   # live window
+```
+
+From Python (e.g. to record a trained agent):
+
+```python
+env.start_trace("ppo.jsonl")          # before reset: whole episodes
+obs, _ = env.reset(seed=0)
+...                                   # step with any policy or model
+env.stop_trace()
+
+from sched_env.replay import load_trace
+from sched_env.viz import animate
+ep = load_trace("ppo.jsonl")[0]
+print(ep.stats)                       # placed, arrived, avg_wait, max_wait, makespan, avg_util, ...
+print(ep.placements[:3])              # raw place events (id, machine, t, arrival, dur)
+animate(ep, ep.frames, "ppo.gif")
+```
+
+`load_trace` rebuilds one frame per tick (machine usage, waiting pool, waits)
+— identical to a live `viz.record` run (checked by a test). Format: one
+JSON object per line, `type` ∈ `episode`, `arrive`, `reject`, `place`,
+`illegal`, `tick`, `done`; documented at the top of
+[src/adapters/observers/trace.zig](../src/adapters/observers/trace.zig).
+Size: roughly 100 bytes per event plus the demand profiles (a 60-job,
+3-episode run ≈ 35 KB); `ticks=0` drops tick lines but then replay cannot
+rebuild frames.
+
 ## 4. Train with Stable-Baselines3
 
 Use `MaskablePPO` from `sb3-contrib` (plain PPO works too, but wastes most of
@@ -235,6 +279,7 @@ declarations mirror them in [python/sched_env/_lib.py](../python/sched_env/_lib.
 | `sim_capacity_ptr` | `[n_machines][n_res]` capacities |
 | `sim_duration_ptr / sim_arrival_ptr` | per-slot metadata |
 | `sim_now(h)`, `sim_stats(h, *SimStats)` | clock and episode statistics |
+| `sim_trace_open(h, path)`, `sim_trace_close(h)` | record events to a JSON Lines trace |
 | `sim_run_policy(h, name, seed, *SimStats)` | full episode with a built-in policy |
 
 Pointers stay valid until `sim_destroy` and always reflect the current state.

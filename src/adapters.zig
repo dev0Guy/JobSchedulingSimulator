@@ -34,11 +34,13 @@ pub const observers = struct {
     pub const VizOptions = @import("adapters/observers/terminal_viz.zig").Options;
     pub const Metrics = @import("adapters/observers/metrics.zig").Metrics;
     pub const EventLog = @import("adapters/observers/event_log.zig").EventLog;
+    pub const Trace = @import("adapters/observers/trace.zig").Trace;
 };
 
 test {
     _ = @import("adapters/arrivals/poisson.zig");
     _ = @import("adapters/arrivals/sample.zig");
+    _ = @import("adapters/observers/trace.zig");
     _ = @import("adapters/arrivals/burst_test.zig");
     @import("std").testing.refAllDecls(rewards);
     @import("std").testing.refAllDecls(policies);

@@ -145,6 +145,15 @@ pub fn observer(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, s:
         m.* = .init(gpa);
         return .init(m);
     }
+    if (std.mem.eql(u8, s.name, "trace")) {
+        try s.only(&.{ "path", "ticks" });
+        const t = try arena.create(A.observers.Trace);
+        t.* = .{ .ticks = try s.boolean("ticks", true) };
+        const path = s.raw("path") orelse "trace.jsonl";
+        t.open(io, std.Io.Dir.cwd(), path) catch |e|
+            return cli.fail("--observe trace: cannot create '{s}': {t}", .{ path, e });
+        return .init(t);
+    }
     if (std.mem.eql(u8, s.name, "log")) {
         try s.only(&.{"ticks"});
         const l = try arena.create(A.observers.EventLog);
@@ -265,5 +274,8 @@ pub const list_text =
     \\  viz      delay=80  per_resource=0  on_place=0  jobs=20  cols=100  color=1
     \\  metrics  wait percentiles, utilization, jobs per machine
     \\  log      ticks=0   one line per event
+    \\  trace    path=trace.jsonl  ticks=1
+    \\           every event + job profiles as JSON Lines, for replay / visualization
+    \\           (python python/examples/replay.py trace.jsonl)
     \\
 ;

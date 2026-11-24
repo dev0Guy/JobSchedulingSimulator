@@ -132,6 +132,17 @@ class SchedEnv(gym.Env):
         return _lib.grid_view(self._mptr, d.n_machines, d, block=d.m_block, stride=d.m_stride,
                               offset=self._lib.sim_machine_head(self._h))
 
+    def start_trace(self, path: str) -> None:
+        """Write every following event to a JSON Lines trace (replay with
+        sched_env.replay). Call before reset() to capture whole episodes."""
+        if self._lib.sim_trace_open(self._h, str(path).encode()) != 0:
+            raise OSError(f"cannot create trace file {path!r}")
+
+    def stop_trace(self) -> None:
+        """Flush and close the trace file."""
+        if self._lib.sim_trace_close(self._h) != 0:
+            raise OSError("writing the trace failed")
+
     def policy_action(self, name: str) -> int:
         """Action a built-in Zig policy would take now (step it yourself)."""
         a = self._lib.sim_policy_action(self._h, name.encode())
