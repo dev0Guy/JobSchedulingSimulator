@@ -16,3 +16,13 @@ zig-out/
 /build/
 /build-*/
 /docgen_tmp/
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# generated outputs
+python/out/
+*.zip
+bench/compare.png
