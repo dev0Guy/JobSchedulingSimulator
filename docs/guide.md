@@ -180,6 +180,20 @@ Stable-Baselines3 `MaskablePPO` example.
 
 ## 6. Testing and benchmarks
 
+What the tests cover:
+
+| File | What it proves |
+|---|---|
+| `src/**` (unit tests) | grids, SIMD ops, sliding window vs a hand-shifted reference, ports, adapters |
+| [tests/scenario_test.zig](../tests/scenario_test.zig) | hand-worked scenarios with exact expected placements, waits, makespan and reward: blocking, multi-machine, exact fit, time-varying profiles, per-resource limits, horizon-length jobs, backfill vs strict FIFO, SJF, best_fit, illegal actions, action masks, admission (pool full / impossible / invalid), truncation, `skip_empty`, reward kinds, reset |
+| same file, `property:` test | 20 random episodes with random (sometimes illegal) actions, checked at every step against a naive reference simulator: free capacity at every tick, legality of every (job, machine), per-step reward, makespan |
+| [tests/engine_test.zig](../tests/engine_test.zig) | whole episodes with every policy: invariants after every event, each job placed once, determinism |
+| `python/tests` | Gymnasium `check_env`, masks, stepping built-in policies, zero-copy views, visualizer |
+
+To add a scenario, script the jobs and capacities, work out the expected
+result by hand in a comment, and assert it (see the helpers `Script`,
+`Recorder` and `Sim` at the top of `scenario_test.zig`).
+
 ```bash
 zig build test                  # unit, integration (tests/), C ABI
 PYTHONPATH=python pytest python/tests

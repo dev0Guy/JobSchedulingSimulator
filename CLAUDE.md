@@ -18,4 +18,6 @@ comparing scheduling policies (later RL via Gymnasium).
   n_ticks`, never subtract below 0 (check `canPlace` first).
 - New adapters: implement the port, export in src/adapters.zig, register in
   src/app/registry.zig (+ help text).
-- Every behavior change needs a test; integration tests in tests/.
+- Every behavior change needs a test; integration tests in tests/. Engine
+  semantics: add a hand-worked case to tests/scenario_test.zig; the
+  `property:` test there checks against a naive reference simulator.

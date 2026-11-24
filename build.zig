@@ -42,6 +42,13 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "sched", .module = lib }},
     }) });
     test_step.dependOn(&b.addRunArtifact(integ).step);
+    const scen = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tests/scenario_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sched", .module = lib }},
+    }) });
+    test_step.dependOn(&b.addRunArtifact(scen).step);
 
     // ---- C ABI shared library for Python: zig build lib ----
     // Default ReleaseFast (RL needs speed); override with -Doptimize.
