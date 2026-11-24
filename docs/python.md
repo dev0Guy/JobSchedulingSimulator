@@ -44,7 +44,7 @@ env = SchedEnv(
     machines="deeprm:n=1",              # same spec as  sim --machines
     jobs="poisson:n=60,rate=0.7",       # same spec as  sim --jobs
     n_res=2, n_ticks=20, max_jobs=10,
-    reward="neg_in_system",             # | neg_waiting | zero
+    reward="neg_in_system",             # | neg_waiting | slowdown | zero (same as --reward)
     max_ticks=2000,                     # truncation (None = never)
 )
 obs, info = env.reset(seed=0)
@@ -66,7 +66,7 @@ Any adapter listed by `zig build run -- --list` works in `machines=` /
 | `n_res` | resources per machine | 2 |
 | `n_ticks` | horizon of every grid (also max job duration) | 20 |
 | `max_jobs` | waiting-pool slots (observation & action size) | 10 |
-| `reward` | `neg_in_system`, `neg_waiting`, `zero` | `neg_in_system` |
+| `reward` | reward spec: `neg_in_system`, `neg_waiting`, `slowdown[:min_dur=k]`, `zero` | `neg_in_system` |
 | `max_ticks` | truncate the episode at this tick | `None` |
 | `illegal_penalty` | reward added for an illegal action | -1.0 |
 | `skip_empty` | fast-forward time while the pool is empty | `True` |
@@ -106,7 +106,7 @@ and is treated as *wait* (`info["illegal"] = True`). Use
 ### Baselines at native speed
 
 ```python
-env.run_policy("sjf", seed=1000)    # fifo | fifo_strict | sjf | best_fit | random
+env.run_policy("sjf", seed=1000)    # fifo | fifo_strict | sjf | best_fit | tetris | tetris_srpt[:weight=2] | random
 ```
 
 runs a whole episode inside Zig with a built-in heuristic and returns the

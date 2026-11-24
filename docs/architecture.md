@@ -27,7 +27,7 @@ Each layer imports only layers above it in this list:
    (slot pool, metadata, bitmask), and the plain types `State`, `Action`,
    `Event`, `JobMeta`.
 3. **ports** — the four interfaces below.
-4. **engine** — `rules` (legality, reward, action encoding/masks) and
+4. **engine** — `rules` (legality, default reward, action encoding/masks) and
    `Engine` (applies actions, enforces rules, emits events).
 5. **adapters** — implementations of the ports.
 6. **app** — composition root: parses the command line, builds adapters by
@@ -41,6 +41,7 @@ Each layer imports only layers above it in this list:
 | `UsageGenerator` | machine capacities; a job's profile | init; per arrival | runtime (vtable) |
 | `Policy` | what to do now? | every decision | comptime (inlined) or runtime |
 | `Observer` | something happened | every event | runtime, list of up to 8 |
+| `Reward` | how good was this tick? | every elapsed tick | runtime (vtable), optional |
 
 Arrival time and profile are separate ports, so any arrival process combines
 with any profile distribution.
@@ -65,8 +66,9 @@ Several placements can happen in the same tick (repeated `.place` steps).
 The episode terminates when all jobs arrived, none wait and none run; it is
 truncated at `max_ticks`.
 
-Rewards (per tick): `neg_in_system` = −(waiting + running) (slowdown,
-DeepRM-style), `neg_waiting` = −waiting, `zero`.
+Rewards come from the `Reward` port (`engine.setReward`): `neg_in_system`
+= −(waiting + running) (the default when none is set), `neg_waiting` =
+−waiting, `slowdown` = −Σ 1/T_j over jobs in system (DeepRM), `zero`.
 
 ## Adding an adapter
 

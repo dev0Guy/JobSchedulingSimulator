@@ -1,4 +1,4 @@
-//! Simulation rules: configuration, legality, reward, action encoding.
+//! Simulation rules: configuration, legality, default reward, action encoding.
 //! Shared by the engine (enforcement) and by policies (queries), so both
 //! use exactly the same definition of "fits".
 
@@ -8,16 +8,6 @@ const model = @import("../model.zig");
 const State = model.State;
 const Action = model.Action;
 
-pub const Reward = enum {
-    /// -(waiting jobs) per tick: minimizes average waiting time.
-    neg_waiting,
-    /// -(waiting + running jobs) per tick: minimizes average job slowdown
-    /// (DeepRM-style).
-    neg_in_system,
-    /// 0 every tick (heuristics / benchmarking).
-    zero,
-};
-
 pub const Config = struct {
     n_res: usize = 10,
     n_ticks: usize = 100,
@@ -25,7 +15,6 @@ pub const Config = struct {
     max_jobs: usize = 128,
     /// Memory padding rule (CPU, or grid.simd_gpu.unified_padding).
     padding: grid.Padding = grid.simd.padding,
-    reward: Reward = .neg_in_system,
     /// Added to the reward of an illegal action (then treated as wait).
     illegal_penalty: f32 = -1.0,
     /// Truncate the episode at this tick (null = never).
@@ -60,13 +49,9 @@ pub fn firstMachine(state: *const State, slot: usize) ?usize {
     return null;
 }
 
-/// Reward for one elapsed tick.
-pub fn tickReward(cfg: Config, waiting: usize, running: usize) f32 {
-    return switch (cfg.reward) {
-        .neg_waiting => -@as(f32, @floatFromInt(waiting)),
-        .neg_in_system => -@as(f32, @floatFromInt(waiting + running)),
-        .zero => 0,
-    };
+/// Default tick reward when no Reward port is set: −(waiting + running).
+pub fn defaultTickReward(waiting: usize, running: usize) f32 {
+    return -@as(f32, @floatFromInt(waiting + running));
 }
 
 // ---------------- flat action encoding (for RL / Gymnasium) ----------------

@@ -17,7 +17,7 @@ class SimConfig(C.Structure):
         ("n_res", C.c_uint32),
         ("n_ticks", C.c_uint32),
         ("max_jobs", C.c_uint32),
-        ("reward", C.c_uint32),
+        ("reward", C.c_char_p),
         ("max_ticks", C.c_int64),
         ("illegal_penalty", C.c_float),
         ("skip_empty", C.c_uint8),
@@ -52,8 +52,6 @@ class SimStats(C.Structure):
     def to_dict(self) -> dict:
         return {name: getattr(self, name) for name, _ in self._fields_}
 
-
-REWARDS = {"neg_in_system": 0, "neg_waiting": 1, "zero": 2}
 
 
 def _find_lib() -> Path:

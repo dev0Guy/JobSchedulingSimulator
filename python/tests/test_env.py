@@ -82,3 +82,24 @@ def test_machine_view_follows_sliding_window():
     assert ticks > 5 * KW["n_ticks"]
     assert np.allclose(obs["machines"], cap[:, :, None] / env.dims.max_cap)  # all jobs finished → empty
     env.close()
+
+
+def test_reward_specs_and_new_adapters():
+    # slowdown reward sums to minus the total slowdown of finished jobs
+    env = SchedEnv(**{**KW, "reward": "slowdown"})
+    env.reset(seed=4)
+    total, done = 0.0, False
+    while not done:
+        _, r, term, trunc, info = env.step(env.policy_action("tetris"))
+        total += r
+        done = term or trunc
+    assert total < 0 and info["stats"]["placed"] == info["stats"]["arrived"]
+    env.close()
+    for jobs in ("mmpp:n=50,rate=0.5", "pareto:n=50,rate=0.5,alpha=1.3", "selfsimilar:n=50,rate=0.5"):
+        e = SchedEnv(**{**KW, "jobs": jobs})
+        st = e.run_policy("tetris", 1)
+        assert st["placed"] == st["arrived"] > 0
+        e.close()
+    import pytest
+    with pytest.raises(ValueError):
+        SchedEnv(**{**KW, "reward": "nope"})

@@ -30,6 +30,18 @@ pub const Action = union(enum) {
     }
 };
 
+/// A job that has started and not yet finished.
+pub const RunningJob = struct {
+    id: u32,
+    machine: u32,
+    start: i64,
+    dur: u16,
+
+    pub fn finish(self: RunningJob) i64 {
+        return self.start + self.dur;
+    }
+};
+
 /// Why a job could not enter the pool.
 pub const RejectReason = enum { pool_full, impossible, invalid_profile };
 

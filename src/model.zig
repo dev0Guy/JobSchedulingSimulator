@@ -5,6 +5,7 @@ pub const Action = types.Action;
 pub const Event = types.Event;
 pub const JobMeta = types.JobMeta;
 pub const RejectReason = types.RejectReason;
+pub const RunningJob = types.RunningJob;
 
 pub const Machines = @import("model/machines.zig").Machines;
 pub const Machine = @import("model/machines.zig").Machine;

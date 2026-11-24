@@ -36,8 +36,8 @@ pub const SimConfig = extern struct {
     n_res: u32 = 10,
     n_ticks: u32 = 100,
     max_jobs: u32 = 128,
-    /// 0 = neg_in_system, 1 = neg_waiting, 2 = zero.
-    reward: u32 = 0,
+    /// Reward spec, e.g. "slowdown" (same as --reward); NULL = neg_in_system.
+    reward: ?[*:0]const u8 = null,
     /// Truncate at this tick; < 0 = never.
     max_ticks: i64 = -1,
     illegal_penalty: f32 = -1.0,
@@ -102,17 +102,10 @@ fn create(c: *const SimConfig) !*Sim {
     errdefer sim.arena.deinit();
     const a = sim.arena.allocator();
 
-    const reward: rules.Reward = switch (c.reward) {
-        0 => .neg_in_system,
-        1 => .neg_waiting,
-        2 => .zero,
-        else => return cli.fail("sim_create: reward must be 0, 1 or 2", .{}),
-    };
     const cfg = sched.Config{
         .n_res = c.n_res,
         .n_ticks = c.n_ticks,
         .max_jobs = c.max_jobs,
-        .reward = reward,
         .max_ticks = if (c.max_ticks < 0) null else c.max_ticks,
         .illegal_penalty = c.illegal_penalty,
         .skip_empty = c.skip_empty != 0,
@@ -125,6 +118,8 @@ fn create(c: *const SimConfig) !*Sim {
     sim.arr = try registry.arrivals(a, try cli.Spec.parse(a, "jobs", std.mem.span(c.jobs)));
     errdefer sim.arr.deinit();
     sim.eng = try sched.Engine.init(gpa, cfg, sim.arr, sim.gen);
+    errdefer sim.eng.deinit();
+    if (c.reward) |r| sim.eng.setReward(try registry.reward(a, try cli.Spec.parse(a, "reward", std.mem.span(r))));
     sim.started = false;
     return sim;
 }
@@ -251,7 +246,10 @@ export fn sim_stats(sim: *const Sim, out: *SimStats) void {
 export fn sim_run_policy(sim: *Sim, name: [*:0]const u8, seed: u64, out: *SimStats) c_int {
     sim.eng.reset(seed) catch return -1;
     sim.started = true;
-    _ = registry.runPolicy(&sim.eng, std.mem.span(name), seed, std.math.maxInt(usize)) catch return -1;
+    var buf: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const spec = cli.Spec.parse(fba.allocator(), "policy", std.mem.span(name)) catch return -1;
+    _ = registry.runPolicy(&sim.eng, spec, seed, std.math.maxInt(usize)) catch return -1;
     sim_stats(sim, out);
     return 0;
 }
@@ -259,17 +257,16 @@ export fn sim_run_policy(sim: *Sim, name: [*:0]const u8, seed: u64, out: *SimSta
 /// Action index a built-in policy would choose in the current state
 /// (for stepping / visualizing heuristics from Python). -1 = unknown name.
 /// Stateful policies (random) are reseeded from the clock and step count.
+/// `name` is a policy spec, e.g. "tetris_srpt:weight=2".
 export fn sim_policy_action(sim: *Sim, name: [*:0]const u8) i64 {
-    const n = std.mem.span(name);
+    var buf: [1024]u8 = undefined; // per call: no growth when called every step
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const spec = cli.Spec.parse(fba.allocator(), "policy", std.mem.span(name)) catch return -1;
+    if (!registry.hasPolicy(spec.name)) return -1;
+    const seed = sim.eng.seed ^ (sim.eng.stats.steps *% 0x9e3779b97f4a7c15);
+    const act = registry.policyAction(&sim.eng, spec, seed) catch return -1;
     const st = sim.eng.state();
-    inline for (registry.policy_types) |P| {
-        if (std.mem.eql(u8, n, P.name)) {
-            var p = P{};
-            sched.ports.policy.resetIfAny(P, &p, sim.eng.seed ^ (sim.eng.stats.steps *% 0x9e3779b97f4a7c15));
-            return @intCast(rules.encode(&st, p.decide(&st)));
-        }
-    }
-    return -1;
+    return @intCast(rules.encode(&st, act));
 }
 
 test "capi: create, mask, step to the end, run_policy" {

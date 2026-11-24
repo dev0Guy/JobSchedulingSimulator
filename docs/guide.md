@@ -20,9 +20,8 @@ For the internals see [architecture.md](architecture.md) and
   now*, or *wait*. Waiting advances time one tick: the machine horizon slides
   one tick (finished work disappears, a fresh empty tick enters at the end), new jobs
   arrive.
-- The **reward** is paid per elapsed tick: `neg_in_system` = −(waiting +
-  running jobs) (minimizes slowdown, as in DeepRM), `neg_waiting` =
-  −(waiting jobs), or `zero`.
+- The **reward** is paid per elapsed tick by a `Reward` adapter (see
+  Rewards below); the default is −(waiting + running jobs).
 - An episode **terminates** when all jobs have arrived, been placed and
   finished, and is **truncated** at `--max-ticks`.
 
@@ -38,10 +37,10 @@ Always use ReleaseFast for real measurements; Debug is ~10–50× slower.
 |---|---|---|
 | `--machines <spec>` | machine capacities + job profiles | `random` |
 | `--jobs <spec>` | arrival process | `poisson` |
-| `--policy <name>` | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `random` | `fifo` |
+| `--policy <spec>` | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt[:weight=w]`, `random` | `fifo` |
 | `--observe <spec>` | `viz`, `metrics`, `log` (repeatable) | none |
 | `--res`, `--ticks`, `--pool` | resources, horizon, waiting slots | 10, 100, 128 |
-| `--reward` | `neg_in_system`, `neg_waiting`, `zero` | `neg_in_system` |
+| `--reward <spec>` | `neg_in_system`, `neg_waiting`, `slowdown`, `zero` | `neg_in_system` |
 | `--max-ticks <n>` | truncate episodes | never |
 | `--seed`, `--episodes` | first seed; episode *i* uses `seed + i` | 42, 1 |
 | `--list` | every adapter with its options | |
@@ -57,9 +56,76 @@ errors, so typos are caught.
 | `random` | `n=4 caps=100/80/60/40 dur=1-20 demand=0-30 varying=0` | machine *i* gets `caps[i % len]` on every resource; uniform duration and demand; `varying=1` changes demand at random points during a job |
 | `deeprm` | `n=1 cap=100 short=3 long=10-15 short_prob=0.8` | DeepRM workload: identical machines, 80 % short jobs, one dominant resource per job (25–50 % of cap), others 5–10 % |
 | `poisson` | `n=500 rate=1.0` | `n` jobs, exponential gaps, `rate` jobs per tick on average |
+| `mmpp` | `n=500 rate=1.0 ratio=10 calm=40 burst=10` | bursty: alternates calm/burst states (geometric lengths, means in ticks); burst rate = `ratio` × calm rate; long-run mean = `rate` |
+| `pareto` | `n=500 rate=1.0 alpha=1.5` | heavy-tailed gaps, Pareto(α) with mean 1/rate; infinite variance for α ≤ 2 |
+| `selfsimilar` | `n=500 rate=1.0 sources=8 alpha=1.4 period=50` | superposition of Pareto ON/OFF sources (Willinger et al. 1997): long-range dependent, Hurst H = (3−α)/2 |
 | `batch` | `n=200` | all jobs at tick 0 |
 
+How bursty they are (index of dispersion = variance/mean of the number of
+arrivals in a window, rate 1, from the unit test):
+
+| Window (ticks) | 1 | 10 | 100 | 1000 |
+|---|---|---|---|---|
+| `poisson` | 1.0 | 1.0 | 1.0 | 0.9 |
+| `mmpp` | 2.7 | 12 | 23 | 19 — bursty, short-range (levels off) |
+| `pareto` α=1.3 | 1.3 | 5.7 | 26 | 100 |
+| `selfsimilar` | 1.1 | 2.1 | 6.4 | 24 — keeps growing (≈ m^(2H−1), H ≈ 0.8) |
+
+All have the same mean rate, so differences between policies under them
+come from burstiness alone.
+
 Arrivals and profiles are independent: any `--jobs` works with any `--machines`.
+
+### Policies
+
+| Name | Picks | Optimizes |
+|---|---|---|
+| `fifo` | oldest job that fits now, first machine (backfill) | fairness, simple |
+| `fifo_strict` | only the oldest job; waits if it does not fit | no starvation |
+| `sjf` | shortest job that fits now | mean wait / slowdown |
+| `best_fit` | (job, machine) leaving least free capacity at tick 0 | tight packing now |
+| `tetris` | (job, machine) with the largest Σ_r Σ_t demand·free / cap² over the job's duration (Grandl et al. 2014) | multi-resource packing across time |
+| `tetris_srpt` | `tetris` alignment − weight · ε · duration, ε = mean(alignment)/mean(duration) over the candidates (the paper's combination) | packing *and* completion time |
+| `random` | random legal placement | sanity baseline |
+
+Pure `tetris` favours large jobs (they score highest), so it packs well but
+has the worst slowdown of the set; `tetris_srpt` adds the paper's
+shortest-remaining-time term. Its `weight` (default 1.5) moves it along the
+trade-off between the two — e.g. on a batch of 500 jobs, 4 heterogeneous
+machines, 4 resources, time-varying demand (5 seeds):
+
+| policy | makespan | slowdown / job | utilization |
+|---|---|---|---|
+| `sjf` | 895 | **17.3** | 68.5 % |
+| `tetris` (= weight 0) | **852** | 54.9 | **72.1 %** |
+| `tetris_srpt:weight=1` | 845 | 49.4 | 72.9 % |
+| `tetris_srpt:weight=1.25` | 856 | 39.8 | 71.9 % |
+| `tetris_srpt` (1.5) | 872 | 23.2 | 70.4 % |
+| `tetris_srpt:weight=2` | 887 | 18.1 | 69.3 % |
+
+With online arrivals and the DeepRM workload (one dominant resource,
+constant demand) packing gains little and the best slowdown is at weight ≈ 2,
+where it behaves like `sjf`.
+
+Policy options: any numeric field of a policy struct can be set in its spec
+(`--policy tetris_srpt:weight=2`; also from Python `run_policy` /
+`policy_action`). Unknown options are errors.
+
+### Rewards
+
+Reward is a port (`ports.Reward`): one call per elapsed tick, with the
+waiting jobs and the running jobs (id, machine, start, duration).
+
+| Spec | Per tick | Summed over an episode |
+|---|---|---|
+| `neg_in_system` (default) | −(waiting + running) | −Σ (wait + duration): mean time in system |
+| `neg_waiting` | −waiting | −Σ wait |
+| `slowdown:min_dur=1` | −Σ 1/max(T_j, min_dur) over jobs in system | −Σ (wait + T_j)/T_j: total slowdown (DeepRM, Mao et al. 2016); `min_dur > 1` gives bounded slowdown |
+| `zero` | 0 | heuristics / benchmarks |
+
+Write your own by implementing `tick(ctx) f32` (see
+[src/ports/reward.zig](../src/ports/reward.zig)) and setting it with
+`engine.setReward(.init(&r))`.
 
 ### Observers
 
@@ -164,6 +230,7 @@ Contracts are documented at the top of each port file:
 | `UsageGenerator` | [src/ports/usage_generator.zig](../src/ports/usage_generator.zig) | `machineCount()`, `machine(i, cap)`, `job(meta, out) u16`, optional `reset(seed)` |
 | `Observer` | [src/ports/observer.zig](../src/ports/observer.zig) | `onEvent(event, state)` |
 | `Policy` | [src/ports/policy.zig](../src/ports/policy.zig) | `decide(state) Action`, optional `reset(seed)` |
+| `Reward` | [src/ports/reward.zig](../src/ports/reward.zig) | `tick(ctx) f32`, optional `reset(seed)` |
 
 Rules that keep experiments valid:
 

@@ -46,9 +46,9 @@ class SchedEnv(gym.Env):
         render_mode: str | None = None,
     ):
         self._lib = _lib.load()
-        self._spec = (machines.encode(), jobs.encode())  # keep bytes alive
+        self._spec = (machines.encode(), jobs.encode(), reward.encode())  # keep bytes alive
         cfg = _lib.SimConfig(
-            self._spec[0], self._spec[1], n_res, n_ticks, max_jobs, _lib.REWARDS[reward],
+            self._spec[0], self._spec[1], n_res, n_ticks, max_jobs, self._spec[2],
             -1 if max_ticks is None else max_ticks, illegal_penalty, int(skip_empty), int(drop_impossible))
         self._h = self._lib.sim_create(C.byref(cfg))
         if not self._h:

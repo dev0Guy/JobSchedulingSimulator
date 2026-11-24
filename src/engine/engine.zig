@@ -64,10 +64,12 @@ pub const Engine = struct {
     arrivals: ports.ArrivalSource,
     generator: ports.UsageGenerator,
     observers: ports.ObserverList = .{},
+    /// Tick reward; null = rules.defaultTickReward (−(waiting + running)).
+    reward: ?ports.Reward = null,
 
     now: i64 = 0,
     seed: u64 = 0,
-    running: std.ArrayList(i64) = .empty, // finish ticks of running jobs
+    running: std.ArrayList(model.RunningJob) = .empty,
     stats: Stats = .{},
     finished: bool = false,
 
@@ -106,6 +108,15 @@ pub const Engine = struct {
         self.running.deinit(self.gpa);
     }
 
+    pub fn setReward(self: *Engine, r: ?ports.Reward) void {
+        self.reward = r;
+    }
+
+    /// Jobs currently running (started, not finished).
+    pub fn runningJobs(self: *const Engine) []const model.RunningJob {
+        return self.running.items;
+    }
+
     pub fn addObserver(self: *Engine, o: ports.Observer) !void {
         try self.observers.add(o);
     }
@@ -126,6 +137,7 @@ pub const Engine = struct {
         self.seed = seed;
         self.arrivals.reset(seed);
         self.generator.reset(seed);
+        if (self.reward) |r| r.reset(seed);
         self.machines.resetAll();
         self.jobs.clearAll();
         self.running.clearRetainingCapacity();
@@ -200,7 +212,7 @@ pub const Engine = struct {
 
         const wait = self.now - self.jobs.arrival[slot];
         const finish = self.now + dur;
-        try self.running.append(self.gpa, finish);
+        try self.running.append(self.gpa, .{ .id = self.jobs.id[slot], .machine = @intCast(m), .start = self.now, .dur = dur });
         self.stats.placed += 1;
         self.stats.total_wait += wait;
         self.stats.max_wait = @max(self.stats.max_wait, wait);
@@ -219,7 +231,10 @@ pub const Engine = struct {
 
     /// One tick of time. Returns that tick's reward.
     fn advanceTick(self: *Engine) !f32 {
-        const reward = rules.tickReward(self.cfg, self.jobs.count, self.running.items.len);
+        const reward = if (self.reward) |r| blk: {
+            const st = self.state();
+            break :blk r.tick(&.{ .state = &st, .running = self.running.items });
+        } else rules.defaultTickReward(self.jobs.count, self.running.items.len);
         self.stats.util_sum += self.machines.utilizationNow();
         self.stats.ticks += 1;
 
@@ -228,7 +243,7 @@ pub const Engine = struct {
 
         var i: usize = 0;
         while (i < self.running.items.len) {
-            if (self.running.items[i] <= self.now) {
+            if (self.running.items[i].finish() <= self.now) {
                 _ = self.running.swapRemove(i);
             } else i += 1;
         }

@@ -16,6 +16,7 @@ comparing scheduling policies (later RL via Gymnasium).
   `free.row(r)[t]` directly. Everything past head + n_ticks must stay = cap.
 - Invariants: job padding = 0, machine padding = capacity, `t + dur <=
   n_ticks`, never subtract below 0 (check `canPlace` first).
+- Ports: Policy, Observer, UsageGenerator, ArrivalSource, Reward.
 - New adapters: implement the port, export in src/adapters.zig, register in
   src/app/registry.zig (+ help text).
 - Every behavior change needs a test; integration tests in tests/. Engine

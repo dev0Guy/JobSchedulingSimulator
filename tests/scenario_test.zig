@@ -2,7 +2,7 @@
 //! out by hand (comments show the arithmetic), plus a property test that
 //! compares the engine against a deliberately naive reference simulator.
 //!
-//! Reward convention checked here (rules.tickReward, neg_in_system): each
+//! Reward convention checked here (default reward = neg_in_system): each
 //! `.wait` pays −(waiting + running) for the tick that ends, counted before
 //! time advances; `.place` pays 0.
 
@@ -341,6 +341,107 @@ test "scenario: best_fit packs the tighter machine, FIFO takes the first" {
     try testing.expectEqual(@as(?u32, 0), b.rec.machineOf(0));
 }
 
+test "scenario: slowdown reward sums to minus the total slowdown" {
+    // jobs (dur 1, 4, 2) exclusive on one machine, SJF order 0,2,1:
+    // starts 0,1,3 → slowdowns (0+1)/1, (3+4)/4, (1+2)/2 = 1 + 1.75 + 1.5 = 4.25
+    const jobs = [_]JobSpec{
+        .{ .dur = 1, .demand = &.{10} },
+        .{ .dur = 4, .demand = &.{10} },
+        .{ .dur = 2, .demand = &.{10} },
+    };
+    var sim = Sim{ .script = .{ .caps = &.{10}, .n_res = 1, .jobs = &jobs } };
+    try sim.start(cfg1(1, 8));
+    defer sim.deinit();
+    var slow = A.rewards.Slowdown{};
+    sim.eng.setReward(.init(&slow));
+    var p = A.policies.ShortestFirst{};
+    const s = try sim.eng.run(&p, 100);
+    try testing.expectApproxEqAbs(@as(f64, -4.25), s.total_reward, 1e-5);
+
+    // bounded slowdown: denominators below min_dur are raised to it
+    var bsim = Sim{ .script = .{ .caps = &.{10}, .n_res = 1, .jobs = &jobs } };
+    try bsim.start(cfg1(1, 8));
+    defer bsim.deinit();
+    var bounded = A.rewards.Slowdown{ .min_dur = 4 };
+    bsim.eng.setReward(.init(&bounded));
+    const b = try bsim.eng.run(&p, 100);
+    // (0+1)/4 + (3+4)/4 + (1+2)/4 = 11/4
+    try testing.expectApproxEqAbs(@as(f64, -2.75), b.total_reward, 1e-5);
+}
+
+test "scenario: tetris aligns job shape with free capacity, best_fit packs tick 0" {
+    // two resources. m0 has room on res 0, m1 on res 1 (both 10 at tick 0
+    // after the blockers). job2 is res-1 heavy → tetris sends it to m1.
+    //   m0 cap (10, 10), blocker uses (2, 8)  → free (8, 2)
+    //   m1 cap (10, 10), blocker uses (8, 2)  → free (2, 8)
+    //   job2 demand (1, 2): fits both; alignment m0 = 1·8+2·2 = 12, m1 = 1·2+2·8 = 18
+    var sim = Sim{ .script = .{ .caps = &.{ 10, 10, 10, 10 }, .n_res = 2, .jobs = &.{
+        .{ .dur = 6, .demand = &.{ 2, 8 } },
+        .{ .dur = 6, .demand = &.{ 8, 2 } },
+        .{ .arrival = 1, .dur = 2, .demand = &.{ 1, 2 } },
+    } } };
+    try sim.start(cfg1(2, 8));
+    defer sim.deinit();
+    _ = try sim.place(0, 0);
+    _ = try sim.place(1, 1);
+    _ = try sim.wait(); // job2 arrives
+    var t = A.policies.Tetris{};
+    const st = sim.eng.state();
+    const a = t.decide(&st);
+    try testing.expectEqual(@as(u32, 1), a.place.machine);
+    // best_fit sees a tie at tick 0 (both leave 0.7 of capacity) → first machine
+    var bf0 = A.policies.BestFit{};
+    try testing.expectEqual(@as(u32, 0), bf0.decide(&st).place.machine);
+
+    // time matters: a job whose demand is high later is sent to the machine
+    // that frees up later in its run. m0 free (2,2,10,10), m1 free (6,6,6,6)
+    // on one resource; job needs (2,2,6,6): fits both, aligns with m0.
+    var sim2 = Sim{ .script = .{ .caps = &.{ 10, 10 }, .n_res = 1, .jobs = &.{
+        .{ .dur = 2, .demand = &.{8} },
+        .{ .dur = 6, .demand = &.{4} },
+        .{ .arrival = 0, .dur = 4, .demand = &.{ 2, 2, 6, 6 } },
+    } } };
+    try sim2.start(cfg1(1, 8));
+    defer sim2.deinit();
+    _ = try sim2.place(0, 0);
+    _ = try sim2.place(1, 1);
+    const st2 = sim2.eng.state();
+    const a2 = t.decide(&st2);
+    try testing.expectEqual(@as(u32, 0), a2.place.machine); // 2·2+2·2+6·10+6·10=128 vs 2·6·2+6·6·2=96
+    var bf = A.policies.BestFit{};
+    try testing.expectEqual(@as(u32, 0), bf.decide(&st2).place.machine); // tick 0: m0 leaves 0 vs m1 4
+}
+
+test "scenario: tetris_srpt trades packing for short jobs via its weight" {
+    // empty machine cap 10. big job A (8 × 4 ticks) vs small job B (2 × 1).
+    // alignment a = demand·free/cap² summed over time: A 3.2, B 0.2.
+    // ε = weight · mean(a)/mean(dur) = weight · 1.7/2.5.
+    //   weight 0   → scores 3.2, 0.2                 → A (pure tetris)
+    //   weight 1.5 → 3.2 − 1.02·4 = −0.88, 0.2 − 1.02 = −0.82 → B
+    const jobs = [_]JobSpec{
+        .{ .dur = 4, .demand = &.{8} },
+        .{ .dur = 1, .demand = &.{2} },
+    };
+    var sim = Sim{ .script = .{ .caps = &.{10}, .n_res = 1, .jobs = &jobs } };
+    try sim.start(cfg1(1, 8));
+    defer sim.deinit();
+    const st = sim.eng.state();
+    const big = sim.slotOf(0);
+    const small = sim.slotOf(1);
+
+    var pure = A.policies.Tetris{};
+    try testing.expectEqual(big, pure.decide(&st).place.slot);
+    var w0 = A.policies.TetrisSrpt{ .weight = 0 };
+    try testing.expectEqual(big, w0.decide(&st).place.slot);
+    var w = A.policies.TetrisSrpt{};
+    try testing.expectEqual(small, w.decide(&st).place.slot);
+    // nothing fits → wait
+    _ = try sim.place(0, 0);
+    _ = try sim.place(1, 0);
+    const st2 = sim.eng.state();
+    try testing.expect(w.decide(&st2) == .wait);
+}
+
 test "scenario: several placements in one tick, time does not move" {
     var sim = Sim{ .script = .{ .caps = &.{10}, .n_res = 1, .jobs = &.{
         .{ .dur = 2, .demand = &.{3} },
@@ -489,18 +590,27 @@ test "scenario: reward kinds" {
     // two exclusive jobs dur 2 each at t0 on one machine:
     // ticks 0,1: 1 waiting + 1 running; ticks 2,3: 0 waiting + 1 running.
     const jobs = [_]JobSpec{ .{ .dur = 2, .demand = &.{10} }, .{ .dur = 2, .demand = &.{10} } };
-    const want = [_]struct { k: rules.Reward, r: f64 }{
-        .{ .k = .neg_in_system, .r = -6 }, // 2+2+1+1
-        .{ .k = .neg_waiting, .r = -2 }, // 1+1
-        .{ .k = .zero, .r = 0 },
+    var in_sys = A.rewards.NegInSystem{};
+    var waiting = A.rewards.NegWaiting{};
+    var zero = A.rewards.Zero{};
+    var slow = A.rewards.Slowdown{};
+    const want = [_]struct { r: ?sched.ports.Reward, v: f64 }{
+        .{ .r = null, .v = -6 }, // default = neg_in_system
+        .{ .r = .init(&in_sys), .v = -6 }, // 2+2+1+1
+        .{ .r = .init(&waiting), .v = -2 }, // 1+1
+        .{ .r = .init(&zero), .v = 0 },
+        // slowdown: −Σ 1/T per job per tick in system; job0 2 ticks, job1 4 ticks,
+        // T = 2 → −(2 + 4)/2 = −3 = −(slowdown 1 + slowdown 2)
+        .{ .r = .init(&slow), .v = -3 },
     };
     for (want) |w| {
         var sim = Sim{ .script = .{ .caps = &.{10}, .n_res = 1, .jobs = &jobs } };
-        try sim.start(.{ .n_res = 1, .n_ticks = 4, .max_jobs = 4, .reward = w.k });
+        try sim.start(.{ .n_res = 1, .n_ticks = 4, .max_jobs = 4 });
         defer sim.deinit();
+        sim.eng.setReward(w.r);
         var p = A.policies.FifoBackfill{};
         const s = try sim.eng.run(&p, 100);
-        try testing.expectEqual(w.r, s.total_reward);
+        try testing.expectEqual(w.v, s.total_reward);
     }
 }
 

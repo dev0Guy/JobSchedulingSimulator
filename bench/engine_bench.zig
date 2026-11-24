@@ -15,11 +15,13 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("{s:>12} | {s:>10} | {s:>12} | {s:>14} | {s:>9} | {s:>8}\n", .{ "policy", "µs/episode", "steps/s", "placements/s", "makespan", "avg wait" });
     std.debug.print("{s:->12}-+-{s:->10}-+-{s:->12}-+-{s:->14}-+-{s:->9}-+-{s:->8}\n", .{ "", "", "", "", "", "" });
 
-    inline for (.{ A.policies.FifoBackfill, A.policies.FifoStrict, A.policies.ShortestFirst, A.policies.BestFit, A.policies.RandomPolicy }) |P| {
+    inline for (.{ A.policies.FifoBackfill, A.policies.FifoStrict, A.policies.ShortestFirst, A.policies.BestFit, A.policies.RandomPolicy, A.policies.Tetris }) |P| {
         var arr = A.arrivals.Poisson{ .total = 500, .rate = 1.0 };
         var gen = A.generators.RandomProfiles{};
-        var eng = try sched.Engine.init(gpa, .{ .reward = .zero }, .init(&arr), .init(&gen));
+        var eng = try sched.Engine.init(gpa, .{}, .init(&arr), .init(&gen));
         defer eng.deinit();
+        var zero = A.rewards.Zero{};
+        eng.setReward(.init(&zero));
 
         var best: i64 = std.math.maxInt(i64);
         var stats: sched.Stats = undefined;

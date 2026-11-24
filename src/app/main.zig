@@ -12,12 +12,12 @@ const usage_text =
     \\usage: sim [options]
     \\  --machines <spec>   usage generator     (default random)
     \\  --jobs <spec>       arrival source      (default poisson)
-    \\  --policy <name>     scheduling policy   (default fifo)
+    \\  --policy <spec>     scheduling policy   (default fifo), e.g. tetris_srpt:weight=2
     \\  --observe <spec>    observer, repeatable (viz, metrics, log)
     \\  --res <n>           resources per machine (default 10)
     \\  --ticks <n>         horizon in ticks      (default 100)
     \\  --pool <n>          waiting-job slots     (default 128)
-    \\  --reward <kind>     neg_in_system | neg_waiting | zero
+    \\  --reward <spec>     neg_in_system | neg_waiting | slowdown | zero
     \\  --max-ticks <n>     truncate episodes at this tick
     \\  --seed <n>          random seed           (default 42)
     \\  --episodes <n>      episodes to run       (default 1)
@@ -50,6 +50,7 @@ fn run(init: std.process.Init) !void {
     var machines_spec: []const u8 = "random";
     var jobs_spec: []const u8 = "poisson";
     var policy: []const u8 = "fifo";
+    var reward_spec: ?[]const u8 = null;
     var observe: std.ArrayList([]const u8) = .empty;
     var cfg = sched.Config{};
     var seed: u64 = 42;
@@ -79,11 +80,11 @@ fn run(init: std.process.Init) !void {
         else if (std.mem.eql(u8, a, "--max-ticks")) cfg.max_ticks = try parseNum(i64, a, v)
         else if (std.mem.eql(u8, a, "--seed")) seed = try parseNum(u64, a, v)
         else if (std.mem.eql(u8, a, "--episodes")) episodes = try parseNum(usize, a, v)
-        else if (std.mem.eql(u8, a, "--reward")) cfg.reward = std.meta.stringToEnum(sched.engine.Reward, v) orelse
-            return cli.fail("--reward: unknown kind '{s}'", .{v})
+        else if (std.mem.eql(u8, a, "--reward")) reward_spec = v
         else return cli.fail("unknown option '{s}' (see --help)", .{a});
     }
-    if (!registry.hasPolicy(policy)) return cli.fail("--policy: unknown policy '{s}' (see --list)", .{policy});
+    const policy_spec = try cli.Spec.parse(arena, "--policy", policy);
+    if (!registry.hasPolicy(policy_spec.name)) return cli.fail("--policy: unknown policy '{s}' (see --list)", .{policy_spec.name});
 
     // ---------------- build adapters ----------------
     const gen = try registry.generator(arena, try cli.Spec.parse(arena, "--machines", machines_spec));
@@ -97,6 +98,7 @@ fn run(init: std.process.Init) !void {
         else => return e,
     };
     defer eng.deinit();
+    if (reward_spec) |rs| eng.setReward(try registry.reward(arena, try cli.Spec.parse(arena, "--reward", rs)));
 
     for (observe.items) |o| try eng.addObserver(try registry.observer(arena, gpa, io, try cli.Spec.parse(arena, "--observe", o)));
     defer eng.observers.deinitAll();
@@ -106,7 +108,7 @@ fn run(init: std.process.Init) !void {
         const ep_seed = seed +% e;
         try eng.reset(ep_seed);
         const t0 = std.Io.Timestamp.now(io, .awake);
-        const st = try registry.runPolicy(&eng, policy, ep_seed, 100_000_000);
+        const st = try registry.runPolicy(&eng, policy_spec, ep_seed, 100_000_000);
         const us = t0.durationTo(std.Io.Timestamp.now(io, .awake)).toMicroseconds();
 
         std.debug.print(

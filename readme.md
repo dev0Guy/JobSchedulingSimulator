@@ -52,7 +52,7 @@ sim [options]
   --policy <name>     scheduling policy    (default fifo)
   --observe <spec>    observer, repeatable (viz, metrics, log)
   --res <n> --ticks <n> --pool <n> --seed <n> --episodes <n>
-  --reward neg_in_system|neg_waiting|zero  --max-ticks <n>
+  --reward neg_in_system|neg_waiting|slowdown|zero  --max-ticks <n>
   --list              all adapters and their options
 ```
 
@@ -68,8 +68,9 @@ zig build run -- --machines deeprm:n=2 --res 2 --ticks 30 --policy sjf
 | Kind | Adapters |
 |---|---|
 | Machines / profiles | `random`, `deeprm` |
-| Job arrivals | `poisson`, `batch` |
-| Policies | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `random` |
+| Job arrivals | `poisson`, `mmpp` (bursty), `pareto` (heavy-tailed), `selfsimilar`, `batch` |
+| Policies | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt`, `random` |
+| Rewards | `neg_in_system` (default), `neg_waiting`, `slowdown` (DeepRM), `zero` |
 | Observers | `viz`, `metrics`, `log` |
 
 ## Build options
@@ -89,7 +90,7 @@ src/
   grid/          aligned grids, SIMD, CPU/GPU padding rules
   model/         machines, jobs, State / Action / Event
   ports/         Policy, Observer, UsageGenerator, ArrivalSource
-  engine/        rules (legality, reward, action encoding) and the step loop
+  engine/        rules (legality, default reward, action encoding) and the step loop
   adapters/      policies, arrivals, generators, observers
   app/           command line, registry, main, capi (C ABI for Python)
 tests/           integration tests
