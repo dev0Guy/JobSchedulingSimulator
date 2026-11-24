@@ -72,6 +72,32 @@ engine benchmark (4 machines, 100 ticks) became ~2× faster.
 - **Quick reject** (`Machine.mayFit`): peak above capacity, or first tick
   above free capacity now — no grid scan.
 - **SIMD fit test** (`Usage.covers`): `L` ticks per compare, early exit.
+- **Arrival-ordered list** (`Jobs.byArrival`, `Jobs.oldest`): waiting jobs
+  are also linked in (arrival, slot) order, so `oldest()` is O(1) and FIFO
+  stops at the first job that fits instead of scanning the whole pool.
+- **"Fits nowhere" memo** (`Jobs.blocked`, `rules.firstMachine`,
+  `rules.knownBlocked/markBlocked`): one bit per job meaning "fits on no
+  machine this tick". Free capacity only shrinks within a tick, so the bit
+  stays valid until the engine clears it when time advances. A hit skips a
+  scan over every machine.
+
+Measured on an M1 Pro (ms per episode, 4 resources, 100 ticks, identical
+results before and after):
+
+| machines / pool | fifo | fifo_strict | sjf | best_fit | tetris_srpt |
+|---|---|---|---|---|---|
+| 4 / 128 | 2.4 → 1.6 | 0.5 → 0.3 | 2.8 → 2.7 | 4.5 → 4.6 | 9.2 → 9.0 |
+| 32 / 128 | 31.6 → 12.3 | 3.4 → 2.3 | 28.0 → 21.1 | 172 → 132 | 263 → 199 |
+| 300 / 128 | 95 → 24 | 16 → 13 | 69 → 33 | 2196 → 2107 | 6828 → 6514 |
+| 300 / 1024 | 1683 → 141 | 36 → 15 | 1118 → 218 | 22698 → 21968 | — |
+
+`best_fit` and `tetris` still score every (job, machine) pair that fits,
+which dominates on large clusters; making that incremental is the next step.
+
+Tried and rejected: a per-(job, machine) fit cache. The fit test is only a
+quick reject plus a few SIMD compares, about as cheap as a scattered cache
+lookup, and every miss adds a write — it made FIFO ~2× slower and best_fit
+only ~5–10 % faster, so it was removed.
 
 ## Sizes (10 resources, 100 ticks, u16)
 

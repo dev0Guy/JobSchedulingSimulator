@@ -1,5 +1,8 @@
 //! Jobs: fixed slot pool [slot][res][stride] (== observation buffer),
-//! struct-of-arrays metadata, and a validity bitmask.
+//! struct-of-arrays metadata, a validity bitmask, and a doubly linked list
+//! of the waiting jobs in (arrival, slot) order — so FIFO-style policies
+//! visit the oldest job first and can stop early instead of scanning the
+//! whole pool.
 //!
 //! Adding a job is two-phase so a generator can write the profile directly
 //! into the pool without copies:
@@ -26,7 +29,19 @@ pub const Jobs = struct {
     peak: []Elem, // [slot * n_res + r]
     valid: []u64, // committed, waiting jobs
     reserved: []u64, // acquired but not committed
+    /// Memo: waiting jobs known to fit on no machine this tick. Capacity only
+    /// shrinks within a tick, so the bit stays true until the engine clears
+    /// it when time advances. Written through `*const Jobs` (slice), like a
+    /// cache: it never changes what the simulation does.
+    blocked: []u64,
     count: usize = 0,
+    // waiting jobs ordered by (arrival, slot); none = end of list
+    prev: []u32,
+    next: []u32,
+    head: u32 = none,
+    tail: u32 = none,
+
+    pub const none = std.math.maxInt(u32);
 
     pub fn init(a: std.mem.Allocator, layout: Layout, max_jobs: usize) !Jobs {
         std.debug.assert(max_jobs > 0);
@@ -44,6 +59,12 @@ pub const Jobs = struct {
         const valid = try a.alloc(u64, words);
         errdefer a.free(valid);
         const reserved = try a.alloc(u64, words);
+        errdefer a.free(reserved);
+        const blocked = try a.alloc(u64, words);
+        errdefer a.free(blocked);
+        const prev = try a.alloc(u32, max_jobs);
+        errdefer a.free(prev);
+        const next = try a.alloc(u32, max_jobs);
 
         var self = Jobs{
             .layout = layout,
@@ -55,6 +76,9 @@ pub const Jobs = struct {
             .peak = peak,
             .valid = valid,
             .reserved = reserved,
+            .blocked = blocked,
+            .prev = prev,
+            .next = next,
         };
         self.clearAll();
         return self;
@@ -68,6 +92,9 @@ pub const Jobs = struct {
         a.free(self.peak);
         a.free(self.valid);
         a.free(self.reserved);
+        a.free(self.blocked);
+        a.free(self.prev);
+        a.free(self.next);
     }
 
     /// Empty the pool.
@@ -75,7 +102,10 @@ pub const Jobs = struct {
         @memset(self.buf, 0);
         @memset(self.valid, 0);
         @memset(self.reserved, 0);
+        @memset(self.blocked, 0);
         self.count = 0;
+        self.head = none;
+        self.tail = none;
     }
 
     pub fn get(self: Jobs, slot: usize) Usage {
@@ -100,6 +130,7 @@ pub const Jobs = struct {
     pub fn acquire(self: *Jobs) ?usize {
         const slot = self.findFree() orelse return null;
         setBit(self.reserved, slot);
+        clearBit(self.blocked, slot);
         self.get(slot).clear();
         return slot;
     }
@@ -127,6 +158,7 @@ pub const Jobs = struct {
         clearBit(self.reserved, slot);
         setBit(self.valid, slot);
         self.count += 1;
+        self.link(@intCast(slot));
     }
 
     /// One-shot add from a flat [n_res][dur] profile (tests, simple sources).
@@ -143,8 +175,23 @@ pub const Jobs = struct {
     pub fn remove(self: *Jobs, slot: usize) void {
         std.debug.assert(self.isValid(slot));
         clearBit(self.valid, slot);
+        clearBit(self.blocked, slot);
         self.get(slot).clear();
         self.count -= 1;
+        self.unlink(@intCast(slot));
+    }
+
+    // ---------------- per-tick "fits nowhere" memo ----------------
+
+    pub inline fn isBlocked(self: Jobs, slot: usize) bool {
+        return testBit(self.blocked, slot);
+    }
+    pub inline fn markBlocked(self: Jobs, slot: usize) void {
+        setBit(self.blocked, slot);
+    }
+    /// Called by the engine when time advances (capacity may have freed up).
+    pub fn clearBlocked(self: Jobs) void {
+        @memset(self.blocked, 0);
     }
 
     // ---------------- iteration ----------------
@@ -171,14 +218,50 @@ pub const Jobs = struct {
         return .{ .valid = self.valid, .bits = self.valid[0] };
     }
 
-    /// Slot of the oldest waiting job (lowest arrival, then lowest slot).
+    /// Slot of the oldest waiting job (lowest arrival, then lowest slot). O(1).
     pub fn oldest(self: Jobs) ?usize {
-        var best: ?usize = null;
-        var it = self.iter();
-        while (it.next()) |s| {
-            if (best == null or self.arrival[s] < self.arrival[best.?]) best = s;
+        return if (self.head == none) null else self.head;
+    }
+
+    pub const ArrivalIter = struct {
+        next_slot: u32,
+        links: []const u32,
+
+        pub fn next(it: *ArrivalIter) ?usize {
+            if (it.next_slot == none) return null;
+            const s = it.next_slot;
+            it.next_slot = it.links[s];
+            return s;
         }
-        return best;
+    };
+
+    /// Waiting jobs, oldest first: (arrival, slot) order.
+    pub fn byArrival(self: Jobs) ArrivalIter {
+        return .{ .next_slot = self.head, .links = self.next };
+    }
+
+    /// Insert at its (arrival, slot) position. Arrivals come in time order,
+    /// so this walks back over at most the jobs of the current tick.
+    fn link(self: *Jobs, s: u32) void {
+        var after = self.tail; // insert after this node
+        while (after != none and self.before(s, after)) after = self.prev[after];
+        const before_node = if (after == none) self.head else self.next[after];
+        self.prev[s] = after;
+        self.next[s] = before_node;
+        if (after == none) self.head = s else self.next[after] = s;
+        if (before_node == none) self.tail = s else self.prev[before_node] = s;
+    }
+
+    fn unlink(self: *Jobs, s: u32) void {
+        const p = self.prev[s];
+        const n = self.next[s];
+        if (p == none) self.head = n else self.next[p] = n;
+        if (n == none) self.tail = p else self.prev[n] = p;
+    }
+
+    /// Does slot a come before slot b in (arrival, slot) order?
+    inline fn before(self: Jobs, a: u32, b: u32) bool {
+        return self.arrival[a] < self.arrival[b] or (self.arrival[a] == self.arrival[b] and a < b);
     }
 
     // ---------------- bits ----------------
@@ -231,4 +314,51 @@ test "jobs: two-phase add, iterate, remove" {
 
     jobs.remove(s0);
     try std.testing.expectEqual(@as(usize, 1), jobs.count);
+}
+
+test "jobs: arrival order list stays sorted by (arrival, slot) under churn" {
+    const a = std.testing.allocator;
+    const layout = try Layout.init(1, 4, simd.padding);
+    var jobs = try Jobs.init(a, layout, 40);
+    defer jobs.deinit(a);
+    var prng = std.Random.DefaultPrng.init(9);
+    const r = prng.random();
+    var t: i64 = 0;
+    for (0..2000) |i| {
+        // mostly in-order arrivals, sometimes out of order (allowed by the API)
+        if (r.uintLessThan(u32, 3) == 0) t += 1;
+        const at = if (r.uintLessThan(u32, 10) == 0) t - r.intRangeAtMost(i64, 0, 3) else t;
+        if (!jobs.full() and r.boolean()) {
+            _ = jobs.add(.{ .id = @intCast(i), .arrival = at }, &.{1}, 1);
+        } else if (jobs.count > 0) {
+            // remove a random waiting job
+            var k = r.uintLessThan(usize, jobs.count);
+            var it = jobs.iter();
+            while (it.next()) |s| {
+                if (k == 0) {
+                    jobs.remove(s);
+                    break;
+                }
+                k -= 1;
+            }
+        }
+        // list == valid set, in (arrival, slot) order; oldest() == head
+        var n: usize = 0;
+        var last: ?usize = null;
+        var it = jobs.byArrival();
+        while (it.next()) |s| : (n += 1) {
+            try std.testing.expect(jobs.isValid(s));
+            if (last) |l| try std.testing.expect(jobs.arrival[l] < jobs.arrival[s] or
+                (jobs.arrival[l] == jobs.arrival[s] and l < s));
+            last = s;
+        }
+        try std.testing.expectEqual(jobs.count, n);
+        // oldest() matches a brute-force scan
+        var best: ?usize = null;
+        var it2 = jobs.iter();
+        while (it2.next()) |s| {
+            if (best == null or jobs.arrival[s] < jobs.arrival[best.?]) best = s;
+        }
+        try std.testing.expectEqual(best, jobs.oldest());
+    }
 }

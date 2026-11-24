@@ -9,16 +9,12 @@ pub const FifoBackfill = struct {
 
     pub fn decide(self: *FifoBackfill, st: *const model.State) model.Action {
         _ = self;
-        var best: ?usize = null;
-        var best_m: usize = 0;
-        var it = st.jobs.iter();
+        // oldest first ((arrival, slot) order): the first job that fits anywhere
+        var it = st.jobs.byArrival();
         while (it.next()) |s| {
-            if (best) |b| if (st.jobs.arrival[s] >= st.jobs.arrival[b]) continue;
             const m = rules.firstMachine(st, s) orelse continue;
-            best = s;
-            best_m = m;
+            return .{ .place = .{ .slot = @intCast(s), .machine = @intCast(m) } };
         }
-        const s = best orelse return .wait;
-        return .{ .place = .{ .slot = @intCast(s), .machine = @intCast(best_m) } };
+        return .wait;
     }
 };

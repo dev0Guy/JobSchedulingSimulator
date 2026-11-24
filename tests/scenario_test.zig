@@ -723,15 +723,22 @@ test "property: engine matches the naive reference on random workloads" {
             var it = sim.eng.jobs.iter();
             var options: [64]Action = undefined;
             var n_opt: usize = 0;
-            while (it.next()) |s| for (0..2) |m| {
-                const spec = specs[sim.eng.jobs.id[s]];
-                const ok = ref.fits(&caps, n_res, n_ticks, m, spec, now);
-                try testing.expectEqual(ok, rules.fitsNow(&st, s, m));
-                if (ok) {
-                    options[n_opt] = .{ .place = .{ .slot = @intCast(s), .machine = @intCast(m) } };
-                    n_opt += 1;
+            while (it.next()) |s| {
+                var first: ?usize = null;
+                for (0..2) |m| {
+                    const spec = specs[sim.eng.jobs.id[s]];
+                    const ok = ref.fits(&caps, n_res, n_ticks, m, spec, now);
+                    try testing.expectEqual(ok, rules.fitsNow(&st, s, m));
+                    if (ok) {
+                        if (first == null) first = m;
+                        options[n_opt] = .{ .place = .{ .slot = @intCast(s), .machine = @intCast(m) } };
+                        n_opt += 1;
+                    }
                 }
-            };
+                // the per-tick "fits nowhere" memo never hides a fit
+                try testing.expectEqual(first, rules.firstMachine(&st, s));
+                try testing.expectEqual(first == null, sim.eng.jobs.isBlocked(s));
+            }
 
             // 3. random policy: mostly legal placements, sometimes wait / illegal
             const roll = rnd.uintLessThan(u32, 10);

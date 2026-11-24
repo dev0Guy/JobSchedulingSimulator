@@ -13,8 +13,11 @@ pub const BestFit = struct {
         var best: ?struct { s: usize, m: usize, score: f32 } = null;
         var it = j.iter();
         while (it.next()) |s| {
+            if (rules.knownBlocked(st, s)) continue;
+            var fits_any = false;
             for (0..st.machines.n) |m| {
                 if (!rules.fitsNow(st, s, m)) continue;
+                fits_any = true;
                 const mach = st.machines.get(m);
                 var left: f32 = 0;
                 for (0..st.machines.layout.n_res) |r| {
@@ -28,6 +31,7 @@ pub const BestFit = struct {
                 }
                 best = .{ .s = s, .m = m, .score = left };
             }
+            if (!fits_any) rules.markBlocked(st, s);
         }
         const b = best orelse return .wait;
         return .{ .place = .{ .slot = @intCast(b.s), .machine = @intCast(b.m) } };

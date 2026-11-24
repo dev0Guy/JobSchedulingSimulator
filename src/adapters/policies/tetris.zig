@@ -46,9 +46,12 @@ fn pick(st: *const model.State, eps: f32) model.Action {
     var best: ?struct { s: usize, m: usize, score: f32 } = null;
     var it = j.iter();
     while (it.next()) |s| {
+        if (rules.knownBlocked(st, s)) continue;
         const pen = eps * @as(f32, @floatFromInt(j.duration[s]));
+        var fits_any = false;
         for (0..st.machines.n) |m| {
             if (!rules.fitsNow(st, s, m)) continue;
+            fits_any = true;
             const score = alignment(st, s, m) - pen;
             if (best) |b| {
                 if (score < b.score) continue;
@@ -56,6 +59,7 @@ fn pick(st: *const model.State, eps: f32) model.Action {
             }
             best = .{ .s = s, .m = m, .score = score };
         }
+        if (!fits_any) rules.markBlocked(st, s);
     }
     const b = best orelse return .wait;
     return .{ .place = .{ .slot = @intCast(b.s), .machine = @intCast(b.m) } };
@@ -83,12 +87,16 @@ pub const TetrisSrpt = struct {
         var n: f32 = 0;
         var it = j.iter();
         while (it.next()) |s| {
+            if (rules.knownBlocked(st, s)) continue;
+            var fits_any = false;
             for (0..st.machines.n) |m| {
                 if (!rules.fitsNow(st, s, m)) continue;
+                fits_any = true;
                 sum_a += alignment(st, s, m);
                 sum_d += @floatFromInt(j.duration[s]);
                 n += 1;
             }
+            if (!fits_any) rules.markBlocked(st, s);
         }
         if (n == 0) return .wait;
         const eps = self.weight * sum_a / @max(sum_d, 1e-6);

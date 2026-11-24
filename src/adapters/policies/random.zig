@@ -19,12 +19,16 @@ pub const RandomPolicy = struct {
         var pick: model.Action = .wait;
         var it = st.jobs.iter();
         while (it.next()) |s| {
+            if (rules.knownBlocked(st, s)) continue;
+            var fits_any = false;
             for (0..st.machines.n) |m| {
                 if (!rules.fitsNow(st, s, m)) continue;
+                fits_any = true;
                 seen += 1;
                 if (r.uintLessThan(usize, seen) == 0)
                     pick = .{ .place = .{ .slot = @intCast(s), .machine = @intCast(m) } };
             }
+            if (!fits_any) rules.markBlocked(st, s);
         }
         return pick;
     }

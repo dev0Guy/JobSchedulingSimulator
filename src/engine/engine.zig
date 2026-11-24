@@ -249,6 +249,7 @@ pub const Engine = struct {
         }
 
         try self.pullArrivals();
+        self.jobs.clearBlocked(); // capacity freed up: re-check everything
         self.emit(.{ .tick_advanced = .{ .now = self.now } });
         return reward;
     }

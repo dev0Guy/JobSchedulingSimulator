@@ -45,8 +45,20 @@ pub fn isLegal(state: *const State, action: Action) bool {
 
 /// First machine on which `slot` fits now, or null.
 pub fn firstMachine(state: *const State, slot: usize) ?usize {
+    if (state.jobs.isBlocked(slot)) return null;
     for (0..state.machines.n) |m| if (fitsNow(state, slot, m)) return m;
+    state.jobs.markBlocked(slot);
     return null;
+}
+
+/// Known (this tick) to fit on no machine? Policies that scan all
+/// (job, machine) pairs skip such jobs; after a scan that found no machine
+/// they call markBlocked. Valid until time advances (the engine clears it).
+pub inline fn knownBlocked(state: *const State, slot: usize) bool {
+    return state.jobs.isBlocked(slot);
+}
+pub inline fn markBlocked(state: *const State, slot: usize) void {
+    state.jobs.markBlocked(slot);
 }
 
 /// Default tick reward when no Reward port is set: −(waiting + running).
@@ -82,6 +94,13 @@ pub fn actionMask(state: *const State, mask: []bool) void {
     mask[mask.len - 1] = true; // wait
     var it = state.jobs.iter();
     while (it.next()) |s| {
-        for (0..state.machines.n) |m| mask[s * state.machines.n + m] = fitsNow(state, s, m);
+        if (state.jobs.isBlocked(s)) continue;
+        var any = false;
+        for (0..state.machines.n) |m| {
+            const f = fitsNow(state, s, m);
+            mask[s * state.machines.n + m] = f;
+            any = any or f;
+        }
+        if (!any) state.jobs.markBlocked(s);
     }
 }
