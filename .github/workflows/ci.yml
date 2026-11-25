@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, setup]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86-64 (AVX2, 16 u16 lanes) and arm64 (NEON, 8 lanes): both SIMD widths
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Zig tests (unit, integration, scenarios, C ABI)
+        run: zig build test --summary all
+
+      - name: Zig tests with a fixed SIMD width (lanes = 32)
+        run: zig build test -Dlanes=32
+
+      - name: Build CLI and smoke-run every policy and arrival process
+        run: |
+          zig build -Doptimize=ReleaseFast
+          for p in fifo fifo_strict sjf best_fit tetris tetris_srpt random; do
+            for j in poisson mmpp pareto selfsimilar batch; do
+              ./zig-out/bin/sim --machines deeprm:n=2 --jobs $j:n=200 --res 2 --ticks 30 \
+                --policy $p --reward slowdown --observe trace:path=/tmp/t.jsonl > /dev/null 2>&1
+            done
+          done
+
+      - name: Build libsched
+        run: zig build lib
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python test dependencies
+        # SB3 / PyTorch are only needed for the training example, not the tests.
+        run: pip install "numpy>=1.26" "gymnasium>=1.0" "matplotlib>=3.8" "pillow>=10" pytest
+
+      - name: Python tests
+        env:
+          PYTHONPATH: python
+          MPLBACKEND: Agg
+        run: pytest -q python/tests
+
+      - name: Replay smoke test
+        env:
+          PYTHONPATH: python
+          MPLBACKEND: Agg
+        run: python python/examples/replay.py /tmp/t.jsonl --list
