@@ -61,6 +61,10 @@ pub const Engine = struct {
     layout: Layout,
     machines: Machines,
     jobs: Jobs,
+    /// One job grid that a job rejected for a full pool is generated into,
+    /// so the generator draws the same random numbers whatever the policy
+    /// did (a seed fixes the whole workload).
+    scratch: []align(grid.simd.CACHE) Elem,
     arrivals: ports.ArrivalSource,
     generator: ports.UsageGenerator,
     observers: ports.ObserverList = .{},
@@ -89,7 +93,9 @@ pub const Engine = struct {
 
         var machines = try Machines.init(gpa, layout, n_m, caps);
         errdefer machines.deinit(gpa);
-        const jobs = try Jobs.init(gpa, layout, cfg.max_jobs);
+        var jobs = try Jobs.init(gpa, layout, cfg.max_jobs);
+        errdefer jobs.deinit(gpa);
+        const scratch = try gpa.alignedAlloc(Elem, grid.simd.ALIGN, layout.block);
 
         return .{
             .gpa = gpa,
@@ -97,6 +103,7 @@ pub const Engine = struct {
             .layout = layout,
             .machines = machines,
             .jobs = jobs,
+            .scratch = scratch,
             .arrivals = arrivals,
             .generator = generator,
         };
@@ -105,6 +112,7 @@ pub const Engine = struct {
     pub fn deinit(self: *Engine) void {
         self.machines.deinit(self.gpa);
         self.jobs.deinit(self.gpa);
+        self.gpa.free(self.scratch);
         self.running.deinit(self.gpa);
     }
 
@@ -258,6 +266,18 @@ pub const Engine = struct {
     fn pullArrivals(self: *Engine) !void {
         while (try self.arrivals.next(self.now)) |meta| {
             const slot = self.jobs.acquire() orelse {
+                // still draw its profile: keeps the generator's random
+                // stream, and so every later job, independent of the policy
+                const g = grid.Usage.fromPool(self.scratch, self.layout, 0);
+                g.clear();
+                _ = self.generator.job(meta, g) catch |e| switch (e) {
+                    error.OutOfMemory => return e,
+                    else => {
+                        // same report as on the admitted path
+                        self.reject(meta.id, .invalid_profile);
+                        continue;
+                    },
+                };
                 self.reject(meta.id, .pool_full);
                 continue;
             };

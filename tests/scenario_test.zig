@@ -807,3 +807,168 @@ test "property: cached pair scores give the same decision as a fresh scan" {
         }
     }
 }
+
+// ------------------------------------------------------------------ seeds
+
+/// `h`: every event plus the demand grid of each arriving job.
+/// `work`: the workload only (arriving jobs: id, tick, duration, demand),
+/// without the episode seed or anything the policy decides.
+const EventHash = struct {
+    h: std.hash.Wyhash = .init(0),
+    work: std.hash.Wyhash = .init(0),
+
+    pub fn onEvent(self: *EventHash, ev: sched.Event, st: *const sched.State) void {
+        if (ev == .job_arrived) {
+            const e = ev.job_arrived;
+            std.hash.autoHash(&self.work, e.id);
+            std.hash.autoHash(&self.work, e.tick);
+            std.hash.autoHash(&self.work, st.jobs.duration[e.slot]);
+            for (0..st.jobs.layout.n_res) |r| self.work.update(std.mem.sliceAsBytes(st.jobs.get(e.slot).row(r)));
+        }
+        self.h.update(@tagName(ev));
+        switch (ev) {
+            inline else => |e| std.hash.autoHash(&self.h, e),
+        }
+        if (ev == .job_arrived) {
+            const s = ev.job_arrived.slot;
+            const job = st.jobs.get(s);
+            self.h.update(std.mem.asBytes(&st.jobs.duration[s]));
+            for (0..st.jobs.layout.n_res) |r| self.h.update(std.mem.sliceAsBytes(job.row(r)));
+        }
+    }
+};
+
+const RunHash = struct { all: u64, work: u64 };
+
+fn seededRun(comptime Arr: type, comptime Gen: type, arr0: Arr, seeds: []const u64, out: []RunHash) !void {
+    var arr = arr0;
+    var gen = Gen{ .n_machines = 3 };
+    var eng = try sched.Engine.init(testing.allocator, .{ .n_res = 2, .n_ticks = 20, .max_jobs = 12 }, .init(&arr), .init(&gen));
+    defer eng.deinit();
+    var hash = EventHash{};
+    try eng.addObserver(.init(&hash));
+    for (seeds, out) |seed, *o| {
+        hash = .{};
+        try eng.reset(seed);
+        var p = A.policies.RandomPolicy{};
+        sched.ports.policy.resetIfAny(A.policies.RandomPolicy, &p, seed);
+        _ = try eng.run(&p, 100_000);
+        o.* = .{ .all = hash.h.final(), .work = hash.work.final() };
+    }
+}
+
+test "property: same seed gives the same episode, on fresh or reused engines" {
+    // Run A: seed 5 on a fresh engine. Run B: seeds 9 then 5 on another
+    // engine, so seed 5 follows a different episode. Both seed-5 episodes
+    // must produce the identical event stream (and job grids); seed 9 not.
+    inline for (.{ A.generators.RandomProfiles, A.generators.DeepRM }) |G| {
+        const arrivals = .{
+            A.arrivals.Poisson{ .total = 150, .rate = 1.5 },
+            A.arrivals.Mmpp{ .total = 150, .rate = 1.5 },
+            A.arrivals.ParetoArrivals{ .total = 150, .rate = 1.5 },
+            A.arrivals.SelfSimilar{ .total = 150, .rate = 1.5 },
+        };
+        inline for (arrivals) |arr| {
+            var a: [1]RunHash = undefined;
+            var b: [3]RunHash = undefined;
+            try seededRun(@TypeOf(arr), G, arr, &.{5}, &a);
+            try seededRun(@TypeOf(arr), G, arr, &.{ 9, 5, 9 }, &b);
+            try testing.expectEqual(a[0], b[1]);
+            try testing.expectEqual(b[0], b[2]);
+            // different seed -> different workload (not just a different seed field)
+            try testing.expect(a[0].work != b[0].work);
+        }
+    }
+}
+
+/// job id -> hash of its demand grid, for every admitted job.
+const Demands = struct {
+    map: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+
+    pub fn onEvent(self: *Demands, ev: sched.Event, st: *const sched.State) void {
+        if (ev != .job_arrived) return;
+        const s = ev.job_arrived.slot;
+        var h = std.hash.Wyhash.init(st.jobs.duration[s]);
+        for (0..st.jobs.layout.n_res) |r| h.update(std.mem.sliceAsBytes(st.jobs.get(s).row(r)));
+        self.map.put(testing.allocator, ev.job_arrived.id, h.final()) catch unreachable;
+    }
+};
+
+fn demandsWith(comptime P: type, d: *Demands) !usize {
+    var arr = A.arrivals.Poisson{ .total = 300, .rate = 2 };
+    var gen = A.generators.RandomProfiles{ .n_machines = 1 };
+    // tiny pool: many pool_full rejections, which differ per policy
+    var eng = try sched.Engine.init(testing.allocator, .{ .n_res = 2, .n_ticks = 20, .max_jobs = 3 }, .init(&arr), .init(&gen));
+    defer eng.deinit();
+    try eng.addObserver(.init(d));
+    try eng.reset(11);
+    var p = P{};
+    defer sched.ports.policy.deinitIfAny(P, &p);
+    return (try eng.run(&p, 100_000)).rejected;
+}
+
+test "property: a seed fixes every job's profile, even when the pool rejects jobs" {
+    var a = Demands{};
+    defer a.map.deinit(testing.allocator);
+    var b = Demands{};
+    defer b.map.deinit(testing.allocator);
+    const ra = try demandsWith(A.policies.FifoStrict, &a);
+    const rb = try demandsWith(A.policies.ShortestFirst, &b);
+    try testing.expect(ra > 0 and rb > 0 and ra != rb); // the policies did reject differently
+    var common: usize = 0;
+    var it = a.map.iterator();
+    while (it.next()) |e| if (b.map.get(e.key_ptr.*)) |h| {
+        try testing.expectEqual(e.value_ptr.*, h);
+        common += 1;
+    };
+    try testing.expect(common > 10);
+}
+
+/// Generator whose n-th call (from reset) returns a 1-tick job of demand n.
+const Counting = struct {
+    calls: Elem = 0,
+    pub fn reset(self: *Counting, seed: u64) void {
+        _ = seed;
+        self.calls = 0;
+    }
+    pub fn machineCount(_: *Counting) usize {
+        return 1;
+    }
+    pub fn machine(_: *Counting, _: usize, cap: []Elem) sched.ports.usage_generator.Error!void {
+        @memset(cap, 10);
+    }
+    pub fn job(self: *Counting, _: sched.JobMeta, out: sched.Usage) sched.ports.usage_generator.Error!u16 {
+        self.calls += 1;
+        out.resourceMut(0)[0] = self.calls;
+        return 1;
+    }
+};
+
+test "scenario: a job rejected for a full pool still draws its profile" {
+    // Pool of 1. Jobs 0 and 1 arrive at t=0, job 2 at t=1.
+    //   t=0: job 0 admitted (draw 1), job 1 pool_full (draw 2)
+    //   wait (job 0 never placed: still holds the slot)
+    //   t=1: job 2 pool_full (draw 3)
+    // Place job 0 at t=1, then job 3 arrives at t=2 and is admitted with
+    // draw 4. Before the fix, rejected jobs drew nothing and job 3 got 2.
+    var metas = [_]sched.JobMeta{
+        .{ .id = 0, .arrival = 0 }, .{ .id = 1, .arrival = 0 },
+        .{ .id = 2, .arrival = 1 }, .{ .id = 3, .arrival = 2 },
+    };
+    var arr = A.arrivals.Fixed{ .items = &metas };
+    var gen = Counting{};
+    var rec = Recorder{};
+    defer rec.deinit();
+    var eng = try sched.Engine.init(testing.allocator, .{ .n_res = 1, .n_ticks = 4, .max_jobs = 1, .skip_empty = false }, .init(&arr), .init(&gen));
+    defer eng.deinit();
+    try eng.addObserver(.init(&rec));
+    try eng.reset(0);
+    try testing.expectEqual(@as(Elem, 1), eng.jobs.get(0).row(0)[0]);
+    _ = try eng.step(.wait);
+    _ = try eng.step(.{ .place = .{ .slot = 0, .machine = 0 } });
+    _ = try eng.step(.wait);
+    try testing.expectEqual(@as(u32, 3), eng.jobs.id[0]);
+    try testing.expectEqual(@as(Elem, 4), eng.jobs.get(0).row(0)[0]);
+    try testing.expectEqual(@as(usize, 2), rec.rejected.items.len);
+    for (rec.rejected.items) |r| try testing.expectEqual(sched.model.RejectReason.pool_full, r);
+}

@@ -26,3 +26,4 @@ __pycache__/
 python/out/
 *.zip
 bench/compare.png
+paper/out/

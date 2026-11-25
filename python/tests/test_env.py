@@ -136,3 +136,32 @@ def test_trace_replay_matches_live_run(tmp_path):
     assert abs(s["avg_wait"] - want["avg_wait"]) < 1e-9
     animate(eps[1], eps[1].frames[:4], str(tmp_path / "r.gif"), fps=10)
 
+
+
+def test_seed_reproduces_episode_across_envs_and_resets():
+    """Same seed -> identical observations and rewards, whether on a fresh
+    env or after other episodes; different seeds -> different workloads."""
+
+    def rollout(env, seed):
+        obs, _ = env.reset(seed=seed)
+        rng = np.random.default_rng(123)  # same action choices
+        frames, done = [], False
+        while not done:
+            frames.append(np.concatenate([obs[k].ravel() for k in sorted(obs)]))
+            a = int(rng.choice(np.flatnonzero(env.action_masks())))
+            obs, r, term, trunc, _ = env.step(a)
+            frames.append(np.array([r], dtype=np.float32))
+            done = term or trunc
+        return np.concatenate(frames)
+
+    for jobs in ["poisson:n=40,rate=0.8", "mmpp:n=40", "pareto:n=40", "selfsimilar:n=40"]:
+        for machines in ["deeprm:n=2", "random:n=3,varying=1"]:
+            kw = {**KW, "jobs": jobs, "machines": machines}
+            a, b = SchedEnv(**kw), SchedEnv(**kw)
+            x = rollout(a, 5)
+            rollout(b, 9)
+            y = rollout(b, 5)  # after a different episode
+            assert np.array_equal(x, y), (jobs, machines)
+            assert not np.array_equal(x, rollout(a, 9))
+            a.close()
+            b.close()
