@@ -13,7 +13,7 @@ const Spec = cli.Spec;
 
 // ---------------------------------------------------------------- generators
 
-pub fn generator(arena: std.mem.Allocator, s: Spec) !ports.UsageGenerator {
+pub fn generator(arena: std.mem.Allocator, io: std.Io, s: Spec) !ports.UsageGenerator {
     if (std.mem.eql(u8, s.name, "random")) {
         try s.only(&.{ "n", "caps", "dur", "demand", "varying" });
         const g = try arena.create(A.generators.RandomProfiles);
@@ -44,7 +44,88 @@ pub fn generator(arena: std.mem.Allocator, s: Spec) !ports.UsageGenerator {
         };
         return .init(g);
     }
+    if (std.mem.eql(u8, s.name, "psplib")) {
+        try s.only(&.{ "path", "n", "cap", "order" });
+        const path = s.raw("path") orelse return cli.fail("--machines psplib: path=<.sm file or directory> is required", .{});
+        const g = try arena.create(A.generators.Psplib);
+        const order_s = s.raw("order") orelse "random";
+        const order = std.meta.stringToEnum(A.generators.psplib.Order, order_s) orelse
+            return cli.fail("--machines psplib: order must be random or sequential, got '{s}'", .{order_s});
+        var acts: std.ArrayList(A.generators.psplib.Activity) = .empty;
+        const n_ren = try loadPsplib(arena, io, path, &acts);
+        g.* = .{
+            .acts = acts.items,
+            .n_renewable = n_ren,
+            .n_machines = try s.int(usize, "n", 1),
+            .cap = try s.int(Elem, "cap", 100),
+            .order = order,
+        };
+        return .init(g);
+    }
     return cli.fail("--machines: unknown generator '{s}' (see --list)", .{s.name});
+}
+
+/// Read a PSPLIB instance file, or every .sm/.mm file of a directory (in
+/// name order, so the template list does not depend on the file system).
+/// Returns the smallest renewable-resource count over the instances.
+fn loadPsplib(arena: std.mem.Allocator, io: std.Io, path: []const u8, acts: *std.ArrayList(A.generators.psplib.Activity)) !usize {
+    const cwd = std.Io.Dir.cwd();
+    const limit: std.Io.Limit = .limited(64 << 20);
+    var names: std.ArrayList([]const u8) = .empty;
+    var dir = cwd.openDir(io, path, .{ .iterate = true }) catch |e| switch (e) {
+        error.NotDir => null,
+        else => return cli.fail("--machines psplib: cannot open '{s}': {t}", .{ path, e }),
+    };
+    if (dir) |*d| {
+        defer d.close(io);
+        var it = d.iterate();
+        while (it.next(io) catch |e| return cli.fail("--machines psplib: cannot list '{s}': {t}", .{ path, e })) |ent| {
+            if (ent.kind != .file) continue;
+            if (!std.mem.endsWith(u8, ent.name, ".sm") and !std.mem.endsWith(u8, ent.name, ".mm")) continue;
+            try names.append(arena, try std.fs.path.join(arena, &.{ path, ent.name }));
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lt(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lt);
+        if (names.items.len == 0) return cli.fail("--machines psplib: no .sm/.mm files in '{s}'", .{path});
+    } else try names.append(arena, path);
+
+    var n_ren: usize = std.math.maxInt(usize);
+    for (names.items) |name| {
+        const text = cwd.readFileAlloc(io, name, arena, limit) catch |e|
+            return cli.fail("--machines psplib: cannot read '{s}': {t}", .{ name, e });
+        const r = A.generators.psplib.parse(arena, text, acts) catch
+            return cli.fail("--machines psplib: '{s}' is not a valid PSPLIB instance", .{name});
+        n_ren = @min(n_ren, r);
+    }
+    return n_ren;
+}
+
+test "psplib spec loads a file and a directory" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "set");
+    try tmp.dir.writeFile(io, .{ .sub_path = "set/a.sm", .data = A.generators.psplib.example_sm });
+    try tmp.dir.writeFile(io, .{ .sub_path = "set/b.sm", .data = A.generators.psplib.example_sm });
+    try tmp.dir.writeFile(io, .{ .sub_path = "set/notes.txt", .data = "ignored" });
+    const base = try tmp.dir.realPathFileAlloc(io, "set", arena);
+
+    var acts: std.ArrayList(A.generators.psplib.Activity) = .empty;
+    try std.testing.expectEqual(@as(usize, 4), try loadPsplib(arena, io, base, &acts));
+    try std.testing.expectEqual(@as(usize, 4), acts.items.len); // 2 files x 2 activities
+    acts.clearRetainingCapacity();
+    _ = try loadPsplib(arena, io, try std.fs.path.join(arena, &.{ base, "a.sm" }), &acts);
+    try std.testing.expectEqual(@as(usize, 2), acts.items.len);
+
+    const spec = try std.fmt.allocPrint(arena, "psplib:path={s},n=2,cap=40,order=sequential", .{base});
+    const g = try generator(arena, io, try cli.Spec.parse(arena, "--machines", spec));
+    try std.testing.expectEqual(@as(usize, 2), g.machineCount());
 }
 
 // ---------------------------------------------------------------- arrivals
@@ -246,6 +327,9 @@ pub const list_text =
     \\           machines cycle through caps; uniform random duration and demand
     \\  deeprm   n=1  cap=100  short=3  long=10-15  short_prob=0.8
     \\           DeepRM workload: 80% short jobs, one dominant resource per job
+    \\  psplib   path=<.sm file or dir>  n=1  cap=100  order=random
+    \\           PSPLIB (RCPSP) activities as jobs: duration + demand / availability x cap;
+    \\           order=random (seeded) or sequential; n_res <= renewable resources (4)
     \\
     \\Job arrivals (--jobs):
     \\  poisson      n=500  rate=1.0                       exponential gaps, mean 1/rate ticks

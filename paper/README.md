@@ -76,6 +76,25 @@ Use `--episodes` that is a multiple of the worker count. Bigger `--batch` /
 `--updates` / `--d-model` use the GPU more; more `--episodes` / `--sims` use
 the CPU cores more.
 
+## PSPLIB workload
+
+Job profiles can come from PSPLIB RCPSP instances (Kolisch & Sprecher 1997)
+instead of DeepRM. Download a set (e.g. j30.sm) from the PSPLIB site and
+unpack it, then:
+
+    python paper/train.py --psplib data/psplib/j30 ...
+    python paper/evaluate.py paper/out/ptr.pt ...      # uses the env stored in the checkpoint
+
+Every activity with duration > 0 becomes a job template: its duration and
+constant demand on the 4 renewable resources, divided by the instance's
+availability and scaled to capacity 100 (so instances can be mixed). Each
+job draws a template with the episode seed; precedence relations are
+ignored. Arrivals stay `poisson:n=80,rate=0.8`. PSPLIB activities are larger
+than DeepRM jobs, so lower the rate if the queue grows without bound.
+
+From the CLI: `sim --machines psplib:path=data/psplib/j30,n=2 --res 4 ...`
+(`order=sequential` takes activities in file order).
+
 ## Evaluation and seeds
 
 Every policy runs on the same seeds: `10¹²`, `10¹² + 1`, … These never overlap with training seeds. Two things are checked, not assumed:
