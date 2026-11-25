@@ -20,7 +20,7 @@ Fairness / reproducibility
 
 Metrics per episode (from the trace): average slowdown (wait + dur) / dur,
 average wait, makespan, total reward, jobs rejected (full pool, impossible)
-and admitted jobs left unplaced.
+admitted jobs left unplaced, and episodes cut off at --max-ticks.
 Writes paper/out/eval.json and prints a mean ± std table.
 """
 
@@ -65,7 +65,8 @@ def read_trace(path: Path) -> tuple[dict, dict]:
          "wait": float(np.mean(wait)) if wait else float("nan"),
          "makespan": done["makespan"] if done else None,
          "unplaced": sum(1 for v in work.values() if v[1] is not None) - len(places),  # admitted, never placed
-         "rejected": sum(1 for v in work.values() if v[1] is None)}
+         "rejected": sum(1 for v in work.values() if v[1] is None),
+         "truncated": int(bool(done and done.get("truncated")))}
     return m, work
 
 
@@ -119,6 +120,8 @@ def main():
     ap.add_argument("--seed-start", type=int, default=EVAL_SEED_START)
     ap.add_argument("--sims", type=int, default=32, help="MCTS simulations per move (0 = skip ptr+mcts)")
     ap.add_argument("--policies", default=",".join(BUILTIN))
+    ap.add_argument("--max-ticks", type=int, default=2000,
+                    help="end (truncate) an episode after this many ticks; counted in the 'truncated' column")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="paper/out/eval.json")
     args = ap.parse_args()
@@ -140,7 +143,10 @@ def main():
         overlap = [s for s in seeds if s in used]
         if overlap:
             raise SystemExit(f"evaluation seeds {overlap[0]}.. were used in training ({used.start}..{used.stop - 1})")
-    env_kw = ck["env"] if ck else ENV_KW
+    env_kw = dict(ck["env"] if ck else ENV_KW)
+    # a policy that keeps choosing "wait" would otherwise never end the episode;
+    # every job has arrived long before this, so the cap does not change the workload
+    env_kw["max_ticks"] = env_kw.get("max_ticks") or args.max_ticks
     env = SchedEnv(**env_kw)
 
     policies = {name: (lambda e, o, s, p, n=name: e.policy_action(n)) for name in args.policies.split(",") if name}
@@ -176,7 +182,7 @@ def main():
     print(f"\n{len(seeds)} seeds from {args.seed_start}; same workload for every policy: "
           f"{'yes' if not checks['workload_mismatch'] else 'NO ' + str(checks['workload_mismatch'])}; "
           f"engine deterministic: {'yes' if not checks['nondeterministic'] else 'NO ' + str(checks['nondeterministic'])}\n")
-    cols = ["slowdown", "wait", "makespan", "reward", "rejected", "unplaced", "sec"]
+    cols = ["slowdown", "wait", "makespan", "reward", "rejected", "unplaced", "truncated", "sec"]
     print(f"{'policy':<14}" + "".join(f"{c:>18}" for c in cols))
     summary = {}
     for name, rows in results.items():
