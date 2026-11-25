@@ -31,6 +31,7 @@ import ctypes as C
 import hashlib
 import math
 import os
+import sys
 import tempfile
 from dataclasses import dataclass, field
 
@@ -39,8 +40,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sched_env import SchedEnv
-from sched_env import _lib
+# find python/sched_env without PYTHONPATH (also in spawned worker processes)
+_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python")
+if _PY not in sys.path:
+    sys.path.insert(0, _PY)
+
+from sched_env import SchedEnv  # noqa: E402
+from sched_env import _lib  # noqa: E402
 
 # Environment used in the paper experiments. Small enough for MCTS on a CPU.
 ENV_KW = dict(

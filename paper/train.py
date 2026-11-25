@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import multiprocessing as mp
+import os
 import random
 import time
 from pathlib import Path
@@ -74,6 +76,43 @@ def train_step(net, opt, batch, device, value_coef):
     return pl.item(), vl.item()
 
 
+# ----------------------------------------------------------------------------- parallel self-play
+# Each self-play episode is independent given the network weights, so they run
+# in worker processes (CPU, one thread each: MCTS evaluates one state at a time,
+# which a GPU does not speed up). Training stays on --device. Every episode's
+# search randomness comes from its own seed, so results do not depend on the
+# number of workers.
+
+_W: dict = {}
+
+
+def _worker_init(d_model: int, threads: int):
+    torch.set_num_threads(threads)
+    env = make_env()
+    _W["env"] = env
+    _W["net"] = PointerNet.for_env(env, d=d_model).eval()
+
+
+def self_play_episode(job):
+    """(state_dict or None, seed, args dict) -> (samples, stats, return).
+    Runs in a worker (or in-process when state_dict is None and _W is set)."""
+    state, seed, a = job
+    if state is not None:
+        _W["net"].load_state_dict(state)
+    env, net = _W["env"], _W["net"]
+    rng = np.random.default_rng([a["seed"], seed])
+    mcts = MCTS(net, ENV_KW, "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng)
+
+    def choose(obs, mask, prefix, expect, step):
+        counts = mcts.search(seed, prefix, expect, noise=True)
+        pi = counts / counts.sum()
+        act = int(rng.choice(len(pi), p=pi)) if step < a["explore_steps"] else int(np.argmax(counts))
+        return act, pi
+
+    with torch.no_grad():
+        return run_episode(env, seed, choose, a["gamma"], a["reward_scale"])
+
+
 def fit(net, opt, buffer, args, device, rng):
     if len(buffer) < args.batch:
         return float("nan"), float("nan")
@@ -105,6 +144,8 @@ def main():
     ap.add_argument("--reward-scale", type=float, default=10.0)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel self-play processes (0 = all cores but one); results do not depend on it")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="paper/out/ptr.pt")
     args = ap.parse_args()
@@ -151,21 +192,19 @@ def main():
         buffer.extend(data)
 
     # 2-3. self-play + training ------------------------------------------------
-    mcts = MCTS(net, ENV_KW, device, sims=args.sims, gamma=args.gamma, reward_scale=args.reward_scale, rng=rng)
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 2)
+    workers = args.workers or max(1, cpus - 1)  # affinity: only the CPUs SLURM/taskset gave us
+    pool = (mp.get_context("spawn").Pool(workers, _worker_init, (args.d_model, 1)) if workers > 1 else None)
+    if pool is None:
+        _worker_init(args.d_model, torch.get_num_threads())
+    print(f"self-play: {workers} worker(s), training on {device}")
     for it in range(args.iters):
         t0 = time.time()
-        net.eval()
+        state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
+        jobs = [(state, next(seeds), vars(args)) for _ in range(args.episodes)]
+        results = pool.map(self_play_episode, jobs) if pool else [self_play_episode(j) for j in jobs]
         rets, slow = [], []
-        for _ in range(args.episodes):
-            seed = next(seeds)
-
-            def choose(obs, mask, prefix, expect, step, seed=seed):
-                counts = mcts.search(seed, prefix, expect, noise=True)
-                pi = counts / counts.sum()
-                a = int(rng.choice(len(pi), p=pi)) if step < args.explore_steps else int(np.argmax(counts))
-                return a, pi
-
-            d, stats, ret = run_episode(env, seed, choose, args.gamma, args.reward_scale)
+        for d, stats, ret in results:
             buffer.extend(d)
             rets.append(ret)
             slow.append(-ret / max(1, stats["placed"]))
@@ -177,6 +216,9 @@ def main():
         print(json.dumps(rec))
         ck = {"model": net.state_dict(), "d_model": args.d_model, "env": ENV_KW, "args": vars(args), "log": log}
         atomic_write(out, lambda p: torch.save(ck, p))
+    if pool:
+        pool.close()
+        pool.join()
     print("saved", out)
 
 

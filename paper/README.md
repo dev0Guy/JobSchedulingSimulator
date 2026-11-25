@@ -60,6 +60,22 @@ The engine cannot be cloned. Each simulation therefore restores the root state w
 
 All randomness is seeded from `--seed`. Training episode e uses seed `seed·10⁶ + e`.
 
+## Running fast (GPU / many-core machine)
+
+Self-play MCTS evaluates one state at a time and replays the engine on the
+CPU, so it is CPU-bound; `--workers N` runs self-play episodes in N parallel
+processes (`0` = all cores but one). Gradient updates run on `--device`.
+Each episode's search randomness comes from its own seed, so the result is
+identical for any number of workers (checked: 1 vs 3 workers give the same log).
+
+    zig build lib -Doptimize=ReleaseFast
+    PYTHONPATH=python:paper python paper/train.py --device cuda --workers 0 \
+        --episodes 32 --sims 64 --batch 512 --updates 200 --iters 50 --out paper/out/ptr.pt
+
+Use `--episodes` that is a multiple of the worker count. Bigger `--batch` /
+`--updates` / `--d-model` use the GPU more; more `--episodes` / `--sims` use
+the CPU cores more.
+
 ## Evaluation and seeds
 
 Every policy runs on the same seeds: `10¹²`, `10¹² + 1`, … These never overlap with training seeds. Two things are checked, not assumed:
