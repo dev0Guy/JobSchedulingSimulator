@@ -91,8 +91,26 @@ results before and after):
 | 300 / 128 | 95 → 24 | 16 → 13 | 69 → 33 | 2196 → 2107 | 6828 → 6514 |
 | 300 / 1024 | 1683 → 141 | 36 → 15 | 1118 → 218 | 22698 → 21968 | — |
 
-`best_fit` and `tetris` still score every (job, machine) pair that fits,
-which dominates on large clusters; making that incremental is the next step.
+- **Incremental pair scores** (`PairCache`, used by `best_fit`, `tetris`,
+  `tetris_srpt`): scores of every (job, machine) pair are kept across
+  decisions. Within a tick a placement changes one machine, so only that
+  machine's column is recomputed (and a job's row rescanned only if its best
+  machine got worse). `Machines.epoch` (reset, time advance) forces a full
+  rebuild; `Machines.stamp[m]` (bumped by `touch` on placement) marks
+  changed columns. Decisions are bit-identical to a full scan (same score
+  function, same tie-breaking; checked by a property test).
+
+Incremental scoring (ms per episode, same setup, identical results):
+
+| machines / pool | best_fit | tetris | tetris_srpt |
+|---|---|---|---|
+| 4 / 128 | 4.3 → 5.7 | 4.2 → 5.4 | 7.5 → 6.6 |
+| 32 / 128 | 112 → 61 | 81 → 50 | 176 → 83 |
+| 300 / 128 | 1810 → 159 | 2860 → 210 | 6056 → 1055 |
+
+On tiny clusters the bookkeeping costs more than it saves (~30 %).
+`tetris_srpt` still sums every cached alignment per decision for its ε
+(kept in full-scan order so rounding matches).
 
 Tried and rejected: a per-(job, machine) fit cache. The fit test is only a
 quick reject plus a few SIMD compares, about as cheap as a scattered cache

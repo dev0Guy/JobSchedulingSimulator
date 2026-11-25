@@ -209,6 +209,7 @@ pub const Engine = struct {
     fn placeNow(self: *Engine, slot: usize, m: usize) !void {
         const dur = self.jobs.duration[slot];
         self.machines.get(m).place(self.jobs.get(slot), dur, 0);
+        self.machines.touch(m);
 
         const wait = self.now - self.jobs.arrival[slot];
         const finish = self.now + dur;

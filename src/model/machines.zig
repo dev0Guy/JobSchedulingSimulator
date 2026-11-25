@@ -125,6 +125,14 @@ pub const Machines = struct {
     cap: []Elem, // [machine * n_res + r]
     /// Start of the horizon inside every row (all machines share it).
     head: usize = 0,
+    /// Change stamps for caches kept across decisions (see
+    /// adapters/policies/pair_cache.zig). `epoch` changes whenever every
+    /// machine may have changed (reset, time advance); `stamp[m]` changes
+    /// when machine m alone changed (`touch`, called by the engine on every
+    /// placement). Both come from one counter that never repeats.
+    epoch: u64 = 0,
+    stamp: []u64,
+    clock: u64 = 0,
 
     /// `caps` is flat [n_machines][n_res].
     pub fn init(a: std.mem.Allocator, layout: Layout, n_machines: usize, caps: []const Elem) !Machines {
@@ -136,7 +144,11 @@ pub const Machines = struct {
         const ring = try Layout.init(layout.n_res, layout.n_ticks + slack, layout.padding);
         const buf = try a.alignedAlloc(Elem, simd.ALIGN, n_machines * ring.block);
         errdefer a.free(buf);
-        var self = Machines{ .layout = layout, .ring = ring, .n = n_machines, .buf = buf, .cap = try a.dupe(Elem, caps) };
+        const cap = try a.dupe(Elem, caps);
+        errdefer a.free(cap);
+        const stamp = try a.alloc(u64, n_machines);
+        @memset(stamp, 0);
+        var self = Machines{ .layout = layout, .ring = ring, .n = n_machines, .buf = buf, .cap = cap, .stamp = stamp };
         self.resetAll();
         return self;
     }
@@ -144,6 +156,17 @@ pub const Machines = struct {
     pub fn deinit(self: *Machines, a: std.mem.Allocator) void {
         a.free(self.buf);
         a.free(self.cap);
+        a.free(self.stamp);
+    }
+
+    fn tick(self: *Machines) u64 {
+        self.clock += 1;
+        return self.clock;
+    }
+
+    /// Record that machine m changed (a job was placed on it).
+    pub fn touch(self: *Machines, m: usize) void {
+        self.stamp[m] = self.tick();
     }
 
     pub fn get(self: Machines, i: usize) Machine {
@@ -158,6 +181,7 @@ pub const Machines = struct {
 
     pub fn resetAll(self: *Machines) void {
         self.head = 0;
+        self.epoch = self.tick();
         for (0..self.n) |i| self.get(i).reset();
     }
 
@@ -165,6 +189,7 @@ pub const Machines = struct {
     /// O(1) unless the window reaches the end of the slack.
     pub fn advanceAll(self: *Machines, k: usize) void {
         self.head += k;
+        self.epoch = self.tick();
         if (self.head + self.layout.n_ticks <= self.ring.n_ticks) return;
         for (0..self.n) |i| self.get(i).compact();
         self.head = 0;

@@ -28,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
         for (0..5) |_| {
             try eng.reset(42);
             var p = P{};
+            defer sched.ports.policy.deinitIfAny(P, &p);
             sched.ports.policy.resetIfAny(P, &p, 42);
             const t0 = std.Io.Timestamp.now(io, .awake);
             stats = try eng.run(&p, 100_000_000);

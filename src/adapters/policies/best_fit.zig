@@ -1,39 +1,37 @@
 //! Best fit: over all (job, machine) pairs that fit now, choose the pair
 //! that leaves the least free capacity at tick 0 (normalized per resource),
 //! packing machines tightly. Ties: oldest job.
+//!
+//! Scores are cached across decisions (`PairCache`): after a placement only
+//! the chosen machine's scores are recomputed.
+const std = @import("std");
 const model = @import("../../model.zig");
-const rules = @import("../../engine.zig").rules;
+const PairCache = @import("pair_cache.zig").PairCache;
 
 pub const BestFit = struct {
     pub const name = "best_fit";
 
-    pub fn decide(self: *BestFit, st: *const model.State) model.Action {
-        _ = self;
-        const j = st.jobs;
-        var best: ?struct { s: usize, m: usize, score: f32 } = null;
-        var it = j.iter();
-        while (it.next()) |s| {
-            if (rules.knownBlocked(st, s)) continue;
-            var fits_any = false;
-            for (0..st.machines.n) |m| {
-                if (!rules.fitsNow(st, s, m)) continue;
-                fits_any = true;
-                const mach = st.machines.get(m);
-                var left: f32 = 0;
-                for (0..st.machines.layout.n_res) |r| {
-                    const cap: f32 = @floatFromInt(@max(1, mach.cap[r]));
-                    const after: f32 = @floatFromInt(mach.freeNow(r) - j.get(s).row(r)[0]);
-                    left += after / cap;
-                }
-                if (best) |b| {
-                    if (left > b.score) continue;
-                    if (left == b.score and j.arrival[s] >= j.arrival[b.s]) continue;
-                }
-                best = .{ .s = s, .m = m, .score = left };
-            }
-            if (!fits_any) rules.markBlocked(st, s);
+    cache: PairCache = .{},
+
+    pub fn deinit(self: *BestFit) void {
+        self.cache.deinit();
+    }
+
+    /// Negated free capacity left after placing (higher = tighter).
+    fn score(_: void, st: *const model.State, s: usize, m: usize) f32 {
+        const mach = st.machines.get(m);
+        const job = st.jobs.get(s);
+        var left: f32 = 0;
+        for (0..st.machines.layout.n_res) |r| {
+            const cap: f32 = @floatFromInt(@max(1, mach.cap[r]));
+            const after: f32 = @floatFromInt(mach.freeNow(r) - job.row(r)[0]);
+            left += after / cap;
         }
-        const b = best orelse return .wait;
-        return .{ .place = .{ .slot = @intCast(b.s), .machine = @intCast(b.m) } };
+        return -left;
+    }
+
+    pub fn decide(self: *BestFit, st: *const model.State) model.Action {
+        self.cache.update(st, score, {}) catch @panic("best_fit: out of memory");
+        return self.cache.pick(st, PairCache.noPen, {});
     }
 };

@@ -208,6 +208,7 @@ pub fn runPolicy(eng: *sched.Engine, s: Spec, seed: u64, max_steps: usize) !sche
         if (std.mem.eql(u8, s.name, P.name)) {
             comptime ports.assertPolicy(P);
             var p = try makePolicy(P, s);
+            defer ports.policy.deinitIfAny(P, &p);
             ports.policy.resetIfAny(P, &p, seed);
             return eng.run(&p, max_steps);
         }
@@ -221,6 +222,7 @@ pub fn policyAction(eng: *sched.Engine, s: Spec, seed: u64) !sched.Action {
     inline for (policy_types) |P| {
         if (std.mem.eql(u8, s.name, P.name)) {
             var p = try makePolicy(P, s);
+            defer ports.policy.deinitIfAny(P, &p);
             ports.policy.resetIfAny(P, &p, seed);
             return p.decide(&st);
         }

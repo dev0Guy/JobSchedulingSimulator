@@ -61,6 +61,7 @@ test "episode: every job placed once, invariants hold, all policies" {
 
         try eng.reset(7);
         var p = P{};
+        defer sched.ports.policy.deinitIfAny(P, &p);
         const st = try eng.run(&p, 1_000_000);
 
         try testing.expect(eng.done());

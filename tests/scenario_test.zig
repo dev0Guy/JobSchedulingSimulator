@@ -330,6 +330,7 @@ test "scenario: best_fit packs the tighter machine, FIFO takes the first" {
     try a.start(cfg1(1, 4));
     defer a.deinit();
     var bf = A.policies.BestFit{};
+    defer bf.deinit();
     _ = try a.eng.run(&bf, 100);
     try testing.expectEqual(@as(?u32, 1), a.rec.machineOf(0));
 
@@ -386,11 +387,13 @@ test "scenario: tetris aligns job shape with free capacity, best_fit packs tick 
     _ = try sim.place(1, 1);
     _ = try sim.wait(); // job2 arrives
     var t = A.policies.Tetris{};
+    defer t.deinit();
     const st = sim.eng.state();
     const a = t.decide(&st);
     try testing.expectEqual(@as(u32, 1), a.place.machine);
     // best_fit sees a tie at tick 0 (both leave 0.7 of capacity) → first machine
     var bf0 = A.policies.BestFit{};
+    defer bf0.deinit();
     try testing.expectEqual(@as(u32, 0), bf0.decide(&st).place.machine);
 
     // time matters: a job whose demand is high later is sent to the machine
@@ -409,6 +412,7 @@ test "scenario: tetris aligns job shape with free capacity, best_fit packs tick 
     const a2 = t.decide(&st2);
     try testing.expectEqual(@as(u32, 0), a2.place.machine); // 2·2+2·2+6·10+6·10=128 vs 2·6·2+6·6·2=96
     var bf = A.policies.BestFit{};
+    defer bf.deinit();
     try testing.expectEqual(@as(u32, 0), bf.decide(&st2).place.machine); // tick 0: m0 leaves 0 vs m1 4
 }
 
@@ -430,10 +434,13 @@ test "scenario: tetris_srpt trades packing for short jobs via its weight" {
     const small = sim.slotOf(1);
 
     var pure = A.policies.Tetris{};
+    defer pure.deinit();
     try testing.expectEqual(big, pure.decide(&st).place.slot);
     var w0 = A.policies.TetrisSrpt{ .weight = 0 };
+    defer w0.deinit();
     try testing.expectEqual(big, w0.decide(&st).place.slot);
     var w = A.policies.TetrisSrpt{};
+    defer w.deinit();
     try testing.expectEqual(small, w.decide(&st).place.slot);
     // nothing fits → wait
     _ = try sim.place(0, 0);
@@ -772,5 +779,31 @@ test "property: engine matches the naive reference on random workloads" {
         try testing.expectEqual(makespan, s.makespan);
         try testing.expect(sim.eng.machines.allIdle());
         _ = episode;
+    }
+}
+
+test "property: cached pair scores give the same decision as a fresh scan" {
+    // A long-lived policy (incremental cache) against a fresh copy at every
+    // step (full rescan), over many placements per tick and time advances.
+    inline for (.{ A.policies.BestFit, A.policies.Tetris, A.policies.TetrisSrpt }) |P| {
+        for (0..4) |seed| {
+            var arr = A.arrivals.Poisson{ .total = 400, .rate = 4 };
+            var gen = A.generators.RandomProfiles{ .n_machines = 6, .varying = true };
+            var eng = try sched.Engine.init(testing.allocator, .{ .n_res = 3, .n_ticks = 30, .max_jobs = 48 }, .init(&arr), .init(&gen));
+            defer eng.deinit();
+            try eng.reset(seed);
+            var cached = P{ .cache = .{ .alloc = testing.allocator } };
+            defer cached.deinit();
+            var steps: usize = 0;
+            while (!eng.finished and steps < 20_000) : (steps += 1) {
+                const st = eng.state();
+                var fresh = P{ .cache = .{ .alloc = testing.allocator } };
+                defer fresh.deinit();
+                const want = fresh.decide(&st);
+                const got = cached.decide(&st);
+                try testing.expectEqual(want, got);
+                _ = try eng.step(got);
+            }
+        }
     }
 }

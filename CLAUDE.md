@@ -16,7 +16,11 @@ comparing scheduling policies (later RL via Gymnasium).
   `free.row(r)[t]` directly. Everything past head + n_ticks must stay = cap.
 - `Jobs.blocked` is a per-tick "fits on no machine" memo: valid only because
   capacity never grows within a tick; the engine clears it on tick advance.
-  Pair-scanning policies should use `rules.knownBlocked/markBlocked`.
+  Pair-scanning policies should use `rules.knownBlocked/markBlocked`, or
+  `PairCache` (adapters/policies/pair_cache.zig), which caches scores across
+  decisions using `Machines.epoch`/`stamp`. Anything that changes a machine
+  outside time advance must call `Machines.touch(m)` (the engine does on place).
+  Policies with caches have `deinit`; callers use `ports.policy.deinitIfAny`.
 - Invariants: job padding = 0, machine padding = capacity, `t + dur <=
   n_ticks`, never subtract below 0 (check `canPlace` first).
 - Ports: Policy, Observer, UsageGenerator, ArrivalSource, Reward.

@@ -37,6 +37,11 @@ pub fn resetIfAny(comptime P: type, p: *P, seed: u64) void {
     if (@hasDecl(P, "reset")) p.reset(seed);
 }
 
+/// Call `deinit` if the policy has one (policies that keep caches).
+pub fn deinitIfAny(comptime P: type, p: *P) void {
+    if (@hasDecl(P, "deinit")) p.deinit();
+}
+
 /// Runtime (type-erased) policy.
 pub const Policy = struct {
     ptr: *anyopaque,
