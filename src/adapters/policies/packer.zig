@@ -13,6 +13,10 @@
 //! machine, then oldest job (DeepRM: lowest slot index). With one machine
 //! this is exactly DeepRM's Packer.
 //!
+//! The dot product is summed exactly in integers; it is stored as f32 by
+//! `PairCache`, which is exact up to 2^24 (e.g. capacities up to ~2000 on
+//! 2 resources), so ties are real ties for realistic capacities.
+//!
 //! Scores are cached across decisions (`PairCache`).
 const model = @import("../../model.zig");
 const PairCache = @import("pair_cache.zig").PairCache;
@@ -20,11 +24,11 @@ const PairCache = @import("pair_cache.zig").PairCache;
 fn score(_: void, st: *const model.State, s: usize, m: usize) f32 {
     const peak = st.jobs.peakOf(s);
     const mach = st.machines.get(m);
-    var acc: f32 = 0;
+    var acc: u64 = 0;
     for (0..st.machines.layout.n_res) |r| {
-        acc += @as(f32, @floatFromInt(mach.resource(r)[0])) * @as(f32, @floatFromInt(peak[r]));
+        acc += @as(u64, mach.resource(r)[0]) * @as(u64, peak[r]);
     }
-    return acc;
+    return @floatFromInt(acc);
 }
 
 pub const Packer = struct {

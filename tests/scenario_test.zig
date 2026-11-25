@@ -466,13 +466,25 @@ test "scenario: packer scores free-now x demand, unnormalized (DeepRM)" {
     defer t.deinit();
     try testing.expectEqual(@as(u32, 1), t.decide(&st).place.machine);
 
+    // the same policy reused on another engine with the same shape but the
+    // machines swapped must not reuse the first engine's cached scores
+    var swapped = Sim{ .script = .{ .caps = &.{ 10, 10, 20, 20 }, .n_res = 2, .jobs = &.{
+        .{ .dur = 2, .demand = &.{ 2, 2 } },
+    } } };
+    try swapped.start(cfg1(2, 8));
+    defer swapped.deinit();
+    const sw = swapped.eng.state();
+    try testing.expectEqual(@as(u32, 1), p.decide(&sw).place.machine);
+
     // job choice, one machine cap (10, 10): A (6, 1) → 10·6 + 10·1 = 70,
-    // B (3, 3) → 60, C (1, 1) → 20: A first; then free (4, 9): B (3,3) → 39,
-    // C (1,1) → 13: B; then free (1, 6): C → 7; then nothing waits.
+    // B (3, 3) → 60, C and D (1, 1) → 20: A first; then free (4, 9):
+    // B → 39, C, D → 13: B; then free (1, 6): C, D → 7, tie → older C;
+    // then free (0, 5): D does not fit → wait, D still waiting.
     var sim2 = Sim{ .script = .{ .caps = &.{ 10, 10 }, .n_res = 2, .jobs = &.{
         .{ .dur = 3, .demand = &.{ 3, 3 } },
         .{ .dur = 3, .demand = &.{ 1, 1 } },
         .{ .dur = 3, .demand = &.{ 6, 1 } },
+        .{ .arrival = 0, .dur = 3, .demand = &.{ 1, 1 } },
     } } };
     try sim2.start(cfg1(2, 8));
     defer sim2.deinit();
@@ -485,6 +497,7 @@ test "scenario: packer scores free-now x demand, unnormalized (DeepRM)" {
         _ = try sim2.place(want, 0);
     }
     const s3 = sim2.eng.state();
+    try testing.expect(s3.jobs.isValid(sim2.slotOf(3)));
     try testing.expect(p2.decide(&s3) == .wait);
 }
 
