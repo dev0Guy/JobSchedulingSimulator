@@ -11,8 +11,8 @@
    steps of an episode, greedy afterwards.
 3. Train on a replay buffer with  CE(π, net) + value_coef · Huber(v, G).
 
-Every episode uses its own training seed (0, 1, 2, ...); evaluation seeds
-(paper/evaluate.py) are disjoint. All randomness (torch, numpy, engine) is
+Every episode uses its own training seed (seed·10⁶ + 0, 1, 2, ...);
+evaluation seeds (paper/evaluate.py) are disjoint, and both scripts check it. All randomness (torch, numpy, engine) is
 seeded from --seed, so a run is reproducible on the same machine.
 """
 
@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ptrmcts import ENV_KW, MCTS, PointerNet, collate, featurize, fingerprint, make_env
+from ptrmcts import ENV_KW, MCTS, PointerNet, atomic_write, collate, featurize, fingerprint, make_env, train_seed_range
 
 
 def discounted(rewards: list[float], gamma: float, scale: float) -> list[float]:
@@ -108,6 +108,9 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="paper/out/ptr.pt")
     args = ap.parse_args()
+    if args.sims < 1:
+        ap.error("--sims must be >= 1")
+    seeds = iter(train_seed_range(args.seed, args.bc_episodes + args.iters * args.episodes))
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -122,7 +125,6 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     log = []
-    next_seed = args.seed * 1_000_000  # training seeds, disjoint from evaluation
 
     # 1. behaviour cloning ------------------------------------------------------
     if args.bc_teacher and args.bc_episodes:
@@ -136,8 +138,7 @@ def main():
 
         data = []
         for _ in range(args.bc_episodes):
-            d, _, _ = run_episode(env, next_seed, teacher, args.gamma, args.reward_scale)
-            next_seed += 1
+            d, _, _ = run_episode(env, next(seeds), teacher, args.gamma, args.reward_scale)
             data += d
         for ep in range(args.bc_epochs):
             perm = rng.permutation(len(data))
@@ -150,14 +151,13 @@ def main():
         buffer.extend(data)
 
     # 2-3. self-play + training ------------------------------------------------
-    mcts = MCTS(net, device, sims=args.sims, gamma=args.gamma, reward_scale=args.reward_scale, rng=rng)
+    mcts = MCTS(net, ENV_KW, device, sims=args.sims, gamma=args.gamma, reward_scale=args.reward_scale, rng=rng)
     for it in range(args.iters):
         t0 = time.time()
         net.eval()
         rets, slow = [], []
         for _ in range(args.episodes):
-            seed = next_seed
-            next_seed += 1
+            seed = next(seeds)
 
             def choose(obs, mask, prefix, expect, step, seed=seed):
                 counts = mcts.search(seed, prefix, expect, noise=True)
@@ -175,8 +175,8 @@ def main():
                "policy_loss": pl, "value_loss": vl, "buffer": len(buffer), "sec": round(time.time() - t0, 1)}
         log.append(rec)
         print(json.dumps(rec))
-        torch.save({"model": net.state_dict(), "d_model": args.d_model, "env": ENV_KW,
-                    "args": vars(args), "log": log}, out)
+        ck = {"model": net.state_dict(), "d_model": args.d_model, "env": ENV_KW, "args": vars(args), "log": log}
+        atomic_write(out, lambda p: torch.save(ck, p))
     print("saved", out)
 
 

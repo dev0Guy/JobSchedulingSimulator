@@ -64,10 +64,17 @@ All randomness is seeded from `--seed`. Training episode e uses seed `seed·10�
 
 Every policy runs on the same seeds: `10¹²`, `10¹² + 1`, … These never overlap with training seeds. Two things are checked, not assumed:
 
-- **Same workload for every policy.** Each run is recorded with the trace observer. For each seed, every job's arrival tick and demand must match across policies.
+- **Same workload for every policy.** For each seed, a reference run with a pool large enough to admit every job records the full workload. Every policy's run, recorded with the trace observer, must have the same jobs at the same ticks. Every job it admitted must have the reference duration and demand, including jobs that another policy rejected for a full pool.
 - **Deterministic engine.** The first policy runs twice per seed, and the two trace files must be byte-identical.
 
-If either check fails, the script exits with an error.
+- **No seed overlap.** The training seeds stored in the checkpoint must not overlap the evaluation seeds.
+
+If any check fails, the script exits with an error.
+
+Other safeguards:
+- Checkpoints are loaded with `weights_only=True`, so loading one cannot run code.
+- Outputs are written atomically.
+- During search, every replay is checked against a hash of the full state: each machine's free capacity, plus each waiting job's grid, duration and arrival tick.
 
 ## Seed bug found and fixed
 

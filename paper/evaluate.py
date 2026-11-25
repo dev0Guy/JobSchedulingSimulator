@@ -7,14 +7,20 @@ Fairness / reproducibility
   * Every policy runs on seeds EVAL_SEED_START + 0..N-1 (disjoint from the
     training seeds). The seed fixes the arrival process and every job's
     demand profile, so all policies see the same workload.
-  * This is checked, not assumed: each run is recorded with the trace
-    observer and the workload (job id -> arrival tick, demand grid) is
-    compared across policies for every seed.
+  * This is checked, not assumed: for every seed a reference run with a
+    pool large enough to admit every job records the full workload (job id
+    -> arrival tick, duration, demand grid). Each policy's run is recorded
+    with the trace observer and must have the same jobs at the same ticks,
+    and every job it admitted must have the reference profile -- including
+    jobs another policy rejected for a full pool.
+  * Training and evaluation seeds must not overlap (checked from the
+    checkpoint's training arguments).
   * Engine determinism is checked too: the first policy is run twice per
     seed and the two trace files must be byte-identical.
 
 Metrics per episode (from the trace): average slowdown (wait + dur) / dur,
-average wait, makespan, total reward, jobs left unplaced.
+average wait, makespan, total reward, jobs rejected (full pool, impossible)
+and admitted jobs left unplaced.
 Writes paper/out/eval.json and prints a mean ± std table.
 """
 
@@ -31,7 +37,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ptrmcts import EVAL_SEED_START, MCTS, PointerNet, act_greedy, fingerprint, make_env
+from ptrmcts import (ENV_KW, EVAL_SEED_START, MCTS, PointerNet, act_greedy, atomic_write, fingerprint,
+                     train_seed_range)
+from sched_env import SchedEnv
 
 BUILTIN = ["fifo", "sjf", "best_fit", "tetris", "tetris_srpt", "random"]
 
@@ -46,7 +54,7 @@ def read_trace(path: Path) -> tuple[dict, dict]:
         if e["type"] == "arrive":
             work[e["id"]] = (e["t"], e["dur"], json.dumps(e["demand"]))
         elif e["type"] == "reject":
-            work.setdefault(e["id"], (e["t"], None, None))  # demand not recorded
+            work.setdefault(e["id"], (e["t"], None, None, e["reason"]))  # profile not in the trace
         elif e["type"] == "place":
             places.append(e)
         elif e["type"] == "done":
@@ -56,22 +64,34 @@ def read_trace(path: Path) -> tuple[dict, dict]:
     m = {"slowdown": float(np.mean(sd)) if sd else float("nan"),
          "wait": float(np.mean(wait)) if wait else float("nan"),
          "makespan": done["makespan"] if done else None,
-         "unplaced": sum(1 for v in work.values() if v[1] is not None) - len(places),
+         "unplaced": sum(1 for v in work.values() if v[1] is not None) - len(places),  # admitted, never placed
          "rejected": sum(1 for v in work.values() if v[1] is None)}
     return m, work
 
 
-def same_workload(a: dict, b: dict) -> bool:
-    """Same jobs at the same ticks; same demand wherever both runs admitted
-    the job (a job rejected for a full pool has no recorded demand)."""
-    if a.keys() != b.keys():
+def same_workload(ref: dict, run: dict) -> bool:
+    """`run` has exactly the reference jobs at the same ticks, and every job
+    it admitted has the reference duration and demand. (`ref` admitted every
+    job, so this also covers jobs this or another policy rejected.)"""
+    if ref.keys() != run.keys():
         return False
-    for k in a:
-        if a[k][0] != b[k][0]:
+    for k, v in run.items():
+        if v[0] != ref[k][0]:
             return False
-        if a[k][1] is not None and b[k][1] is not None and a[k][1:] != b[k][1:]:
+        if v[1] is not None and v[1:3] != ref[k][1:3]:
             return False
     return True
+
+
+def reference_workload(env_kw: dict, seed: int, path: Path) -> dict:
+    """Full workload of `seed`: a run with a pool big enough to admit every job."""
+    env = SchedEnv(**{**env_kw, "max_jobs": 1024})
+    _, work = run(env, seed, lambda e, o, s, p: e.policy_action("fifo"), path)
+    env.close()
+    full = [k for k, v in work.items() if v[1] is None and v[3] == "pool_full"]
+    if full:
+        raise SystemExit(f"reference run for seed {seed} still rejected {len(full)} jobs for a full pool")
+    return work
 
 
 def run(env, seed, policy, trace: Path) -> dict:
@@ -107,19 +127,30 @@ def main():
     np.random.seed(0)
     torch.manual_seed(0)
     device = torch.device(args.device)
-    env = make_env()
     seeds = [args.seed_start + i for i in range(args.episodes)]
+    ck = None
+    if args.checkpoint:
+        # weights_only: plain tensors/containers only, no arbitrary code on load
+        ck = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        missing = {"model", "d_model", "env", "args"} - set(ck)
+        if missing:
+            raise SystemExit(f"{args.checkpoint}: not a train.py checkpoint (missing {sorted(missing)})")
+        tr = ck["args"]
+        used = train_seed_range(tr["seed"], tr["bc_episodes"] + tr["iters"] * tr["episodes"])
+        overlap = [s for s in seeds if s in used]
+        if overlap:
+            raise SystemExit(f"evaluation seeds {overlap[0]}.. were used in training ({used.start}..{used.stop - 1})")
+    env_kw = ck["env"] if ck else ENV_KW
+    env = SchedEnv(**env_kw)
 
     policies = {name: (lambda e, o, s, p, n=name: e.policy_action(n)) for name in args.policies.split(",") if name}
-    if args.checkpoint:
-        ck = torch.load(args.checkpoint, map_location=device)
+    if ck:
         net = PointerNet.for_env(env, d=ck["d_model"]).to(device)
         net.load_state_dict(ck["model"])
         net.eval()
         policies["ptr"] = lambda e, o, s, p: act_greedy(net, o, e.action_masks(), device)
         if args.sims:
-            tr = ck["args"]
-            mcts = MCTS(net, device, sims=args.sims, gamma=tr["gamma"], reward_scale=tr["reward_scale"])
+            mcts = MCTS(net, env_kw, device, sims=args.sims, gamma=tr["gamma"], reward_scale=tr["reward_scale"])
             policies[f"ptr+mcts{args.sims}"] = (
                 lambda e, o, s, p: int(np.argmax(mcts.search(s, p, fingerprint(e), noise=False))))
 
@@ -128,25 +159,24 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         for seed in seeds:
-            ref_work = None
+            ref_work = reference_workload(env_kw, seed, tmp / "ref.jsonl")
             for k, (name, pol) in enumerate(policies.items()):
                 m, work = run(env, seed, pol, tmp / f"{k}.jsonl")
                 results[name].append({"seed": seed, **m})
-                if ref_work is None:
-                    ref_work = work
+                if not same_workload(ref_work, work):
+                    checks["workload_mismatch"].append((seed, name))
+                if k == 0:
                     # determinism: same policy, same seed, again -> identical trace bytes
                     run(env, seed, pol, tmp / "again.jsonl")
                     h = [hashlib.sha256((tmp / f).read_bytes()).hexdigest() for f in (f"{k}.jsonl", "again.jsonl")]
                     if h[0] != h[1]:
                         checks["nondeterministic"].append(seed)
-                elif not same_workload(ref_work, work):
-                    checks["workload_mismatch"].append((seed, name))
             print(f"seed {seed}: " + "  ".join(f"{n} {results[n][-1]['slowdown']:.2f}" for n in policies))
 
     print(f"\n{len(seeds)} seeds from {args.seed_start}; same workload for every policy: "
           f"{'yes' if not checks['workload_mismatch'] else 'NO ' + str(checks['workload_mismatch'])}; "
           f"engine deterministic: {'yes' if not checks['nondeterministic'] else 'NO ' + str(checks['nondeterministic'])}\n")
-    cols = ["slowdown", "wait", "makespan", "reward", "unplaced", "sec"]
+    cols = ["slowdown", "wait", "makespan", "reward", "rejected", "unplaced", "sec"]
     print(f"{'policy':<14}" + "".join(f"{c:>18}" for c in cols))
     summary = {}
     for name, rows in results.items():
@@ -160,8 +190,9 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"seeds": seeds, "checks": checks, "summary": summary, "episodes": results,
-                               "checkpoint": args.checkpoint}, indent=1))
+    text = json.dumps({"seeds": seeds, "env": env_kw, "checks": checks, "summary": summary,
+                       "episodes": results, "checkpoint": args.checkpoint}, indent=1)
+    atomic_write(out, lambda p: Path(p).write_text(text))
     print("\nsaved", out)
     if checks["workload_mismatch"] or checks["nondeterministic"]:
         raise SystemExit("seed checks FAILED")

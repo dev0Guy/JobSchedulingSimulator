@@ -28,7 +28,10 @@ Search (`MCTS`)
 from __future__ import annotations
 
 import ctypes as C
+import hashlib
 import math
+import os
+import tempfile
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -51,6 +54,31 @@ ENV_KW = dict(
 
 # Seed ranges: training and evaluation never share a workload.
 EVAL_SEED_START = 10**12  # training uses seed·10⁶ + episode
+TRAIN_SEED_BLOCK = 10**6   # episodes per --seed value
+
+
+def train_seed_range(seed: int, n_episodes: int) -> range:
+    """Seeds a training run with `--seed seed` uses (must stay below EVAL_SEED_START)."""
+    if n_episodes > TRAIN_SEED_BLOCK:
+        raise ValueError(f"at most {TRAIN_SEED_BLOCK} training episodes per --seed")
+    r = range(seed * TRAIN_SEED_BLOCK, seed * TRAIN_SEED_BLOCK + n_episodes)
+    if r.stop > EVAL_SEED_START:
+        raise ValueError(f"training seeds {r.start}..{r.stop - 1} would reach the evaluation seeds")
+    return r
+
+
+def atomic_write(path, write) -> None:
+    """write(tmp_path) then rename over `path`: a failed write never
+    destroys the previous complete file."""
+    path = os.fspath(path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
+    os.close(fd)
+    try:
+        write(tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def make_env(**overrides) -> SchedEnv:
@@ -140,28 +168,28 @@ class Replayer:
     ctypes steps (no observation copies) for speed.
     """
 
-    def __init__(self, **env_kw):
-        self.env = make_env(**env_kw)
+    def __init__(self, env_kw: dict):
+        self.env = SchedEnv(**env_kw)
         self._res = _lib.SimStep()
         self._st = _lib.SimStats()
 
     def fingerprint(self) -> tuple:
-        self.env._lib.sim_stats(self.env._h, C.byref(self._st))
-        s = self._st
-        return (s.now, s.arrived, s.placed, s.rejected, s.waiting, round(s.total_reward, 4))
+        return fingerprint(self.env)
 
     def restore(self, seed: int, actions: list[int], expect: tuple | None = None) -> None:
         lib, h = self.env._lib, self.env._h
         if lib.sim_reset(h, seed) != 0:
             raise RuntimeError("sim_reset failed")
         for a in actions:
-            lib.sim_step(h, a, C.byref(self._res))
+            if lib.sim_step(h, a, C.byref(self._res)) != 0:
+                raise RuntimeError(f"replay failed: step after the episode ended (seed {seed})")
         if expect is not None and self.fingerprint() != expect:
             raise RuntimeError(f"replay diverged (seed {seed}): {self.fingerprint()} != {expect}. "
                                "The engine is not deterministic for this seed.")
 
     def step(self, a: int) -> tuple[float, bool]:
-        self.env._lib.sim_step(self.env._h, a, C.byref(self._res))
+        if self.env._lib.sim_step(self.env._h, a, C.byref(self._res)) != 0:
+            raise RuntimeError("search stepped past the end of the episode")
         r = self._res
         return float(r.reward), bool(r.terminated or r.truncated)
 
@@ -202,14 +230,18 @@ class MCTS:
     min-max normalized inside the tree (MuZero), so the scale only matters
     for the value head's targets."""
 
-    def __init__(self, net: PointerNet, device="cpu", sims: int = 32, c_puct: float = 1.5,
+    def __init__(self, net: PointerNet, env_kw: dict, device="cpu", sims: int = 32, c_puct: float = 1.5,
                  gamma: float = 0.98, reward_scale: float = 10.0, dirichlet: float = 0.3,
-                 noise_frac: float = 0.25, rng: np.random.Generator | None = None, **env_kw):
+                 noise_frac: float = 0.25, rng: np.random.Generator | None = None):
+        """`env_kw`: the exact SchedEnv config of the episodes searched (required:
+        the search replays them on its own engine)."""
+        if sims < 1:
+            raise ValueError("MCTS needs sims >= 1")
         self.net, self.device = net, device
         self.sims, self.c, self.gamma, self.scale = sims, c_puct, gamma, reward_scale
         self.dirichlet, self.noise_frac = dirichlet, noise_frac
         self.rng = rng or np.random.default_rng(0)
-        self.rp = Replayer(**env_kw)
+        self.rp = Replayer(env_kw)
 
     def _expand(self, node: Node) -> float:
         env = self.rp.env
@@ -264,8 +296,17 @@ class MCTS:
 
 
 def fingerprint(env: SchedEnv) -> tuple:
+    """Full-state fingerprint: counters plus a hash of every machine's free
+    capacity and, for each waiting slot, its job grid, duration and arrival."""
     s = env.stats()
-    return (s["now"], s["arrived"], s["placed"], s["rejected"], s["waiting"], round(s["total_reward"], 4))
+    r = env.raw()
+    h = hashlib.blake2b(digest_size=16)
+    v = r["valid"]
+    h.update(np.ascontiguousarray(r["free"]).tobytes())
+    h.update(v.tobytes())
+    for k in ("jobs", "duration", "arrival"):  # empty slots hold stale data: skip them
+        h.update(np.ascontiguousarray(r[k][v]).tobytes())
+    return (s["now"], s["arrived"], s["placed"], s["rejected"], s["waiting"], s["total_reward"], h.hexdigest())
 
 
 def act_greedy(net, obs, mask, device) -> int:

@@ -270,7 +270,14 @@ pub const Engine = struct {
                 // stream, and so every later job, independent of the policy
                 const g = grid.Usage.fromPool(self.scratch, self.layout, 0);
                 g.clear();
-                _ = self.generator.job(meta, g) catch |e| if (e == error.OutOfMemory) return e;
+                _ = self.generator.job(meta, g) catch |e| switch (e) {
+                    error.OutOfMemory => return e,
+                    else => {
+                        // same report as on the admitted path
+                        self.reject(meta.id, .invalid_profile);
+                        continue;
+                    },
+                };
                 self.reject(meta.id, .pool_full);
                 continue;
             };
