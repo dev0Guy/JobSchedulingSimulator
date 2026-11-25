@@ -192,7 +192,8 @@ def main():
         buffer.extend(data)
 
     # 2-3. self-play + training ------------------------------------------------
-    workers = args.workers or max(1, (os.cpu_count() or 2) - 1)
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 2)
+    workers = args.workers or max(1, cpus - 1)  # affinity: only the CPUs SLURM/taskset gave us
     pool = (mp.get_context("spawn").Pool(workers, _worker_init, (args.d_model, 1)) if workers > 1 else None)
     if pool is None:
         _worker_init(args.d_model, torch.get_num_threads())
