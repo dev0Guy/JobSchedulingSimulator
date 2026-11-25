@@ -23,7 +23,7 @@ Outputs go to `paper/out/`, which git ignores: `ptr.pt` holds the weights, the c
 - 80 Poisson jobs at 0.8 per tick;
 - 2 resources;
 - a 20-tick horizon;
-- a pool of 10 waiting slots;
+- a waiting pool with one slot per job (80), so it is never full: no job is rejected and the model always sees every waiting job;
 - the DeepRM slowdown reward.
 
 Its sum over an episode is minus the total slowdown.
