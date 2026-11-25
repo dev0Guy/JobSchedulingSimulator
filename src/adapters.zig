@@ -7,6 +7,7 @@ pub const policies = struct {
     pub const RandomPolicy = @import("adapters/policies/random.zig").RandomPolicy;
     pub const Tetris = @import("adapters/policies/tetris.zig").Tetris;
     pub const TetrisSrpt = @import("adapters/policies/tetris.zig").TetrisSrpt;
+    pub const Packer = @import("adapters/policies/packer.zig").Packer;
 };
 
 pub const arrivals = struct {

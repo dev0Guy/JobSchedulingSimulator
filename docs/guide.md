@@ -37,7 +37,7 @@ Always use ReleaseFast for real measurements; Debug is ~10–50× slower.
 |---|---|---|
 | `--machines <spec>` | machine capacities + job profiles | `random` |
 | `--jobs <spec>` | arrival process | `poisson` |
-| `--policy <spec>` | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt[:weight=w]`, `random` | `fifo` |
+| `--policy <spec>` | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt[:weight=w]`, `packer`, `random` | `fifo` |
 | `--observe <spec>` | `viz`, `metrics`, `log` (repeatable) | none |
 | `--res`, `--ticks`, `--pool` | resources, horizon, waiting slots | 10, 100, 128 |
 | `--reward <spec>` | `neg_in_system`, `neg_waiting`, `slowdown`, `zero` | `neg_in_system` |
@@ -86,6 +86,7 @@ Arrivals and profiles are independent: any `--jobs` works with any `--machines`.
 | `best_fit` | (job, machine) leaving least free capacity at tick 0 | tight packing now |
 | `tetris` | (job, machine) with the largest Σ_r Σ_t demand·free / cap² over the job's duration (Grandl et al. 2014) | multi-resource packing across time |
 | `tetris_srpt` | `tetris` alignment − weight · ε · duration, ε = mean(alignment)/mean(duration) over the candidates (the paper's combination) | packing *and* completion time |
+| `packer` | DeepRM's Packer: max Σ_r free[r][now] · demand[r] over the pairs that fit; no normalization, current tick only | packing (DeepRM baseline) |
 | `random` | random legal placement | sanity baseline |
 
 Pure `tetris` favours large jobs (they score highest), so it packs well but

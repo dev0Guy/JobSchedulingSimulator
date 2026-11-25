@@ -69,7 +69,7 @@ zig build run -- --machines deeprm:n=2 --res 2 --ticks 30 --policy sjf
 |---|---|
 | Machines / profiles | `random`, `deeprm` |
 | Job arrivals | `poisson`, `mmpp` (bursty), `pareto` (heavy-tailed), `selfsimilar`, `batch` |
-| Policies | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt`, `random` |
+| Policies | `fifo`, `fifo_strict`, `sjf`, `best_fit`, `tetris`, `tetris_srpt`, `packer`, `random` |
 | Rewards | `neg_in_system` (default), `neg_waiting`, `slowdown` (DeepRM), `zero` |
 | Observers | `viz`, `metrics`, `log`, `trace` (JSON Lines for offline replay) |
 
