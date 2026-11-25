@@ -31,7 +31,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ptrmcts import ENV_KW, MCTS, PointerNet, atomic_write, collate, featurize, fingerprint, make_env, train_seed_range
+from ptrmcts import MCTS, PointerNet, atomic_write, collate, env_config, featurize, fingerprint, train_seed_range
+from sched_env import SchedEnv
 
 
 def discounted(rewards: list[float], gamma: float, scale: float) -> list[float]:
@@ -86,10 +87,10 @@ def train_step(net, opt, batch, device, value_coef):
 _W: dict = {}
 
 
-def _worker_init(d_model: int, threads: int):
+def _worker_init(env_kw: dict, d_model: int, threads: int):
     torch.set_num_threads(threads)
-    env = make_env()
-    _W["env"] = env
+    env = SchedEnv(**env_kw)
+    _W["env"], _W["env_kw"] = env, env_kw
     _W["net"] = PointerNet.for_env(env, d=d_model).eval()
 
 
@@ -101,7 +102,7 @@ def self_play_episode(job):
         _W["net"].load_state_dict(state)
     env, net = _W["env"], _W["net"]
     rng = np.random.default_rng([a["seed"], seed])
-    mcts = MCTS(net, ENV_KW, "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng)
+    mcts = MCTS(net, _W["env_kw"], "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng)
 
     def choose(obs, mask, prefix, expect, step):
         counts = mcts.search(seed, prefix, expect, noise=True)
@@ -143,6 +144,8 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.98)
     ap.add_argument("--reward-scale", type=float, default=10.0)
     ap.add_argument("--d-model", type=int, default=128)
+    ap.add_argument("--psplib", default=None,
+                    help="take job profiles from PSPLIB instances (.sm file or directory) instead of DeepRM")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=1,
                     help="parallel self-play processes (0 = all cores but one); results do not depend on it")
@@ -159,7 +162,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     device = torch.device(args.device)
 
-    env = make_env()
+    env_kw = env_config(args.psplib)
+    env = SchedEnv(**env_kw)
     net = PointerNet.for_env(env, d=args.d_model).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     buffer = collections.deque(maxlen=args.buffer)
@@ -194,9 +198,9 @@ def main():
     # 2-3. self-play + training ------------------------------------------------
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 2)
     workers = args.workers or max(1, cpus - 1)  # affinity: only the CPUs SLURM/taskset gave us
-    pool = (mp.get_context("spawn").Pool(workers, _worker_init, (args.d_model, 1)) if workers > 1 else None)
+    pool = (mp.get_context("spawn").Pool(workers, _worker_init, (env_kw, args.d_model, 1)) if workers > 1 else None)
     if pool is None:
-        _worker_init(args.d_model, torch.get_num_threads())
+        _worker_init(env_kw, args.d_model, torch.get_num_threads())
     print(f"self-play: {workers} worker(s), training on {device}")
     for it in range(args.iters):
         t0 = time.time()
@@ -214,7 +218,7 @@ def main():
                "policy_loss": pl, "value_loss": vl, "buffer": len(buffer), "sec": round(time.time() - t0, 1)}
         log.append(rec)
         print(json.dumps(rec))
-        ck = {"model": net.state_dict(), "d_model": args.d_model, "env": ENV_KW, "args": vars(args), "log": log}
+        ck = {"model": net.state_dict(), "d_model": args.d_model, "env": env_kw, "args": vars(args), "log": log}
         atomic_write(out, lambda p: torch.save(ck, p))
     if pool:
         pool.close()

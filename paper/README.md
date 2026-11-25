@@ -23,7 +23,7 @@ Outputs go to `paper/out/`, which git ignores: `ptr.pt` holds the weights, the c
 - 80 Poisson jobs at 0.8 per tick;
 - 2 resources;
 - a 20-tick horizon;
-- a pool of 10 waiting slots;
+- a waiting pool with one slot per job (80), so it is never full: no job is rejected and the model always sees every waiting job;
 - the DeepRM slowdown reward.
 
 Its sum over an episode is minus the total slowdown.
@@ -75,6 +75,25 @@ identical for any number of workers (checked: 1 vs 3 workers give the same log).
 Use `--episodes` that is a multiple of the worker count. Bigger `--batch` /
 `--updates` / `--d-model` use the GPU more; more `--episodes` / `--sims` use
 the CPU cores more.
+
+## PSPLIB workload
+
+Job profiles can come from PSPLIB RCPSP instances (Kolisch & Sprecher 1997)
+instead of DeepRM. Download a set (e.g. j30.sm) from the PSPLIB site and
+unpack it, then:
+
+    python paper/train.py --psplib data/psplib/j30 ...
+    python paper/evaluate.py paper/out/ptr.pt ...      # uses the env stored in the checkpoint
+
+Every activity with duration > 0 becomes a job template: its duration and
+constant demand on the 4 renewable resources, divided by the instance's
+availability and scaled to capacity 100 (so instances can be mixed). Each
+job draws a template with the episode seed; precedence relations are
+ignored. Arrivals stay `poisson:n=80,rate=0.8`. PSPLIB activities are larger
+than DeepRM jobs, so lower the rate if the queue grows without bound.
+
+From the CLI: `sim --machines psplib:path=data/psplib/j30,n=2 --res 4 ...`
+(`order=sequential` takes activities in file order).
 
 ## Evaluation and seeds
 

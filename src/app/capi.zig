@@ -122,7 +122,8 @@ fn create(c: *const SimConfig) !*Sim {
     };
     if (c.max_jobs == 0) return cli.fail("sim_create: max_jobs must be > 0", .{});
 
-    sim.gen = try registry.generator(a, try cli.Spec.parse(a, "machines", std.mem.span(c.machines)));
+    sim.threaded = std.Io.Threaded.init_single_threaded;
+    sim.gen = try registry.generator(a, sim.threaded.io(), try cli.Spec.parse(a, "machines", std.mem.span(c.machines)));
     errdefer sim.gen.deinit();
     sim.arr = try registry.arrivals(a, try cli.Spec.parse(a, "jobs", std.mem.span(c.jobs)));
     errdefer sim.arr.deinit();
@@ -132,7 +133,6 @@ fn create(c: *const SimConfig) !*Sim {
     sim.started = false;
     sim.trace = .{};
     sim.tracing = false;
-    sim.threaded = std.Io.Threaded.init_single_threaded;
     try sim.eng.addObserver(.init(sim));
     return sim;
 }

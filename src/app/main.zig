@@ -87,7 +87,7 @@ fn run(init: std.process.Init) !void {
     if (!registry.hasPolicy(policy_spec.name)) return cli.fail("--policy: unknown policy '{s}' (see --list)", .{policy_spec.name});
 
     // ---------------- build adapters ----------------
-    const gen = try registry.generator(arena, try cli.Spec.parse(arena, "--machines", machines_spec));
+    const gen = try registry.generator(arena, io, try cli.Spec.parse(arena, "--machines", machines_spec));
     defer gen.deinit();
     const arr = try registry.arrivals(arena, try cli.Spec.parse(arena, "--jobs", jobs_spec));
     defer arr.deinit();

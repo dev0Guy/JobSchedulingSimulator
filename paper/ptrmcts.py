@@ -49,12 +49,16 @@ from sched_env import SchedEnv  # noqa: E402
 from sched_env import _lib  # noqa: E402
 
 # Environment used in the paper experiments. Small enough for MCTS on a CPU.
+# The waiting pool has one slot per job in the episode, so it can never be
+# full: no job is rejected and the model always sees every waiting job (the
+# pointer network handles any number of jobs; empty slots are masked).
+N_JOBS = 80
 ENV_KW = dict(
     machines="deeprm:n=1",
-    jobs="poisson:n=80,rate=0.8",
+    jobs=f"poisson:n={N_JOBS},rate=0.8",
     n_res=2,
     n_ticks=20,
-    max_jobs=10,
+    max_jobs=N_JOBS,
     reward="slowdown",
 )
 
@@ -85,6 +89,19 @@ def atomic_write(path, write) -> None:
     except BaseException:
         os.unlink(tmp)
         raise
+
+
+def env_config(psplib: str | None = None) -> dict:
+    """ENV_KW, or with job profiles from PSPLIB instances (a .sm file or a
+    directory of them): 4 renewable resources, demand / availability x 100."""
+    if not psplib:
+        return dict(ENV_KW)
+    path = os.path.abspath(psplib)
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    if "," in path or "=" in path:
+        raise ValueError(f"PSPLIB path must not contain ',' or '=': {path}")
+    return {**ENV_KW, "machines": f"psplib:path={path},n=1", "n_res": 4}
 
 
 def make_env(**overrides) -> SchedEnv:

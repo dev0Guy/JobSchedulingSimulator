@@ -20,6 +20,8 @@ pub const arrivals = struct {
 pub const generators = struct {
     pub const RandomProfiles = @import("adapters/generators/random_profiles.zig").RandomProfiles;
     pub const DeepRM = @import("adapters/generators/deeprm.zig").DeepRM;
+    pub const psplib = @import("adapters/generators/psplib.zig");
+    pub const Psplib = psplib.Psplib;
 };
 
 pub const rewards = struct {
