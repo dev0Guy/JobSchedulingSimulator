@@ -23,10 +23,20 @@ def _always_wait(env):
 
 
 def test_penalty_formula():
-    assert truncation_penalty(-0.5, 0.999) == pytest.approx(-0.5 * 999)
-    assert truncation_penalty(-0.5, 0.999, 0.0) == 0.0
-    with pytest.raises(ValueError):
-        truncation_penalty(-1.0, 1.0)
+    env = make_env(max_ticks=50)
+    env.reset(seed=1)
+    wait = env.dims.n_actions - 1
+    done = False
+    while not done:
+        done = any(env.step(wait)[2:4])  # never place: cut off at tick 50
+    raw = env.raw()
+    dur = raw["duration"][raw["valid"]].astype(float)
+    assert len(dur) > 0 and raw["now"] == 50
+    want = -sum((50 + d) / d + 10 for d in dur)
+    assert truncation_penalty(env) == pytest.approx(want)
+    assert truncation_penalty(env, 0.0) == 0.0
+    assert truncation_penalty(env, 2.0) == pytest.approx(2 * want)
+    env.close()
 
 
 def test_cut_off_episode_gets_penalty_but_logged_return_does_not():

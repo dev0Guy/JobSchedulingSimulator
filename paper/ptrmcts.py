@@ -63,7 +63,7 @@ ENV_KW = dict(
     # Hard episode limit. Without it a policy that keeps choosing "wait" never
     # ends the episode (and MCTS replay makes each step slower): training
     # would hang. A normal episode of 80 jobs ends in ~100-200 ticks.
-    max_ticks=1000,
+    max_ticks=2000,
 )
 
 # Seed ranges: training and evaluation never share a workload.
@@ -226,15 +226,22 @@ class Replayer:
         return float(r.reward), bool(r.terminated or r.truncated), trunc
 
 
-def truncation_penalty(reward: float, gamma: float, mult: float = 1.0) -> float:
-    """Extra reward for the step that hit max_ticks. The jobs still in the
-    system would keep costing `reward` per tick; the episode is cut, so add
-    that cost as if it went on forever: reward * gamma / (1 - gamma).
-    Without it, a policy that never places some job pays only until the cut,
-    which (with discounting) looks cheap and teaches it to starve jobs."""
-    if gamma >= 1.0:
-        raise ValueError("truncation penalty needs gamma < 1")
-    return mult * reward * gamma / (1.0 - gamma)
+CUTOFF_CONST = 10.0
+
+
+def truncation_penalty(env, mult: float = 1.0) -> float:
+    """Extra reward for the step that hit max_ticks, read from `env` right
+    after that step. Every job still waiting is charged as if it were placed
+    only at the end of the simulation: its slowdown would be
+    (sim length + dur) / dur, plus a constant CUTOFF_CONST:
+
+        -mult * sum_j [ (now + dur_j) / dur_j + CUTOFF_CONST ]
+
+    Without it, a policy that never places some job pays only 1/dur per tick
+    until the cut, which looks cheap and teaches it to starve jobs."""
+    raw = env.raw()
+    dur = np.maximum(raw["duration"][raw["valid"]].astype(np.float64), 1.0)
+    return -mult * float(np.sum((raw["now"] + dur) / dur + CUTOFF_CONST))
 
 
 # ----------------------------------------------------------------------------- MCTS
@@ -323,7 +330,7 @@ class MCTS:
                 a, node = self._select(node, mm)
                 r, done, cut = self.rp.step(a)
                 if cut and self.trunc_penalty:
-                    r += truncation_penalty(r, self.gamma, self.trunc_penalty)
+                    r += truncation_penalty(self.rp.env, self.trunc_penalty)
                 node.reward, node.terminal = r, done
                 path.append(node)
             g = 0.0 if node.terminal else self._expand(node)

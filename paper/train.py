@@ -57,7 +57,7 @@ def run_episode(env, seed, choose, gamma, scale, trunc_penalty=1.0):
         obs, r, term, trunc, info = env.step(a)
         raw += r
         if trunc and not term and trunc_penalty:
-            r += truncation_penalty(r, gamma, trunc_penalty)  # training target only
+            r += truncation_penalty(env, trunc_penalty)  # training target only
         rewards.append(r)
         prefix.append(a)
         done = term or trunc
@@ -150,8 +150,8 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.999,
                     help="discount; close to 1 so a job left waiting stays expensive (0.98 taught starvation)")
     ap.add_argument("--trunc-penalty", type=float, default=1.0,
-                    help="multiplier of the max_ticks cut-off penalty: the cost of the jobs still in the "
-                         "system continued forever, reward*gamma/(1-gamma); 0 disables")
+                    help="multiplier of the max_ticks cut-off penalty: every job still waiting is charged "
+                         "(sim length + dur)/dur + 10, as if placed at the end; 0 disables")
     ap.add_argument("--reward-scale", type=float, default=10.0)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--psplib", default=None,
