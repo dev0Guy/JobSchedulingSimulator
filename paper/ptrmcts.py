@@ -60,6 +60,10 @@ ENV_KW = dict(
     n_ticks=20,
     max_jobs=N_JOBS,
     reward="slowdown",
+    # Hard episode limit. Without it a policy that keeps choosing "wait" never
+    # ends the episode (and MCTS replay makes each step slower): training
+    # would hang. A normal episode of 80 jobs ends in ~100-200 ticks.
+    max_ticks=1000,
 )
 
 # Seed ranges: training and evaluation never share a workload.
