@@ -255,6 +255,7 @@ pub const policy_types = .{
     A.policies.RandomPolicy,
     A.policies.Tetris,
     A.policies.TetrisSrpt,
+    A.policies.Packer,
 };
 
 pub fn hasPolicy(name: []const u8) bool {
@@ -349,6 +350,7 @@ pub const list_text =
     \\  tetris       (job, machine) pair whose demand best aligns with free capacity over time
     \\  tetris_srpt  weight=1.5   tetris alignment minus weight x shortest-job term (Grandl et al.)
     \\               0 = pure tetris (packing, makespan), ~2 = close to sjf (slowdown)
+    \\  packer       DeepRM's Packer: max free-now . demand (unnormalized, current tick only)
     \\
     \\Rewards (--reward), per elapsed tick:
     \\  neg_in_system           -(waiting + running)        (default)

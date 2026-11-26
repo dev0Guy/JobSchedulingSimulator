@@ -106,7 +106,7 @@ and is treated as *wait* (`info["illegal"] = True`). Use
 ### Baselines at native speed
 
 ```python
-env.run_policy("sjf", seed=1000)    # fifo | fifo_strict | sjf | best_fit | tetris | tetris_srpt[:weight=2] | random
+env.run_policy("sjf", seed=1000)    # fifo | fifo_strict | sjf | best_fit | tetris | tetris_srpt[:weight=2] | packer | random
 ```
 
 runs a whole episode inside Zig with a built-in heuristic and returns the

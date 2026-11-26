@@ -129,10 +129,11 @@ pub const Machines = struct {
     /// adapters/policies/pair_cache.zig). `epoch` changes whenever every
     /// machine may have changed (reset, time advance); `stamp[m]` changes
     /// when machine m alone changed (`touch`, called by the engine on every
-    /// placement). Both come from one counter that never repeats.
+    /// placement). Both come from one process-wide counter that never
+    /// repeats, so a cache reused with another engine (or after a reset)
+    /// can never mistake its old values for current ones.
     epoch: u64 = 0,
     stamp: []u64,
-    clock: u64 = 0,
 
     /// `caps` is flat [n_machines][n_res].
     pub fn init(a: std.mem.Allocator, layout: Layout, n_machines: usize, caps: []const Elem) !Machines {
@@ -159,9 +160,10 @@ pub const Machines = struct {
         a.free(self.stamp);
     }
 
-    fn tick(self: *Machines) u64 {
-        self.clock += 1;
-        return self.clock;
+    var clock = std.atomic.Value(u64).init(0);
+
+    fn tick(_: *Machines) u64 {
+        return clock.fetchAdd(1, .monotonic) + 1;
     }
 
     /// Record that machine m changed (a job was placed on it).

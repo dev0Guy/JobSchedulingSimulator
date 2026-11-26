@@ -41,7 +41,7 @@ from ptrmcts import (ENV_KW, EVAL_SEED_START, MCTS, PointerNet, act_greedy, atom
                      train_seed_range)
 from sched_env import SchedEnv
 
-BUILTIN = ["fifo", "sjf", "best_fit", "tetris", "tetris_srpt", "random"]
+BUILTIN = ["fifo", "sjf", "best_fit", "tetris", "tetris_srpt", "packer", "random"]
 
 
 def read_trace(path: Path) -> tuple[dict, dict]:
