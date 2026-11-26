@@ -214,11 +214,24 @@ class Replayer:
             raise RuntimeError(f"replay diverged (seed {seed}): {self.fingerprint()} != {expect}. "
                                "The engine is not deterministic for this seed.")
 
-    def step(self, a: int) -> tuple[float, bool]:
+    def step(self, a: int) -> tuple[float, bool, bool]:
+        """-> (reward, done, cut off at max_ticks)."""
         if self.env._lib.sim_step(self.env._h, a, C.byref(self._res)) != 0:
             raise RuntimeError("search stepped past the end of the episode")
         r = self._res
-        return float(r.reward), bool(r.terminated or r.truncated)
+        trunc = bool(r.truncated) and not bool(r.terminated)
+        return float(r.reward), bool(r.terminated or r.truncated), trunc
+
+
+def truncation_penalty(reward: float, gamma: float, mult: float = 1.0) -> float:
+    """Extra reward for the step that hit max_ticks. The jobs still in the
+    system would keep costing `reward` per tick; the episode is cut, so add
+    that cost as if it went on forever: reward * gamma / (1 - gamma).
+    Without it, a policy that never places some job pays only until the cut,
+    which (with discounting) looks cheap and teaches it to starve jobs."""
+    if gamma >= 1.0:
+        raise ValueError("truncation penalty needs gamma < 1")
+    return mult * reward * gamma / (1.0 - gamma)
 
 
 # ----------------------------------------------------------------------------- MCTS
@@ -258,8 +271,9 @@ class MCTS:
     for the value head's targets."""
 
     def __init__(self, net: PointerNet, env_kw: dict, device="cpu", sims: int = 32, c_puct: float = 1.5,
-                 gamma: float = 0.98, reward_scale: float = 10.0, dirichlet: float = 0.3,
-                 noise_frac: float = 0.25, rng: np.random.Generator | None = None):
+                 gamma: float = 0.999, reward_scale: float = 10.0, dirichlet: float = 0.3,
+                 noise_frac: float = 0.25, rng: np.random.Generator | None = None,
+                 trunc_penalty: float = 1.0):
         """`env_kw`: the exact SchedEnv config of the episodes searched (required:
         the search replays them on its own engine)."""
         if sims < 1:
@@ -267,6 +281,7 @@ class MCTS:
         self.net, self.device = net, device
         self.sims, self.c, self.gamma, self.scale = sims, c_puct, gamma, reward_scale
         self.dirichlet, self.noise_frac = dirichlet, noise_frac
+        self.trunc_penalty = trunc_penalty
         self.rng = rng or np.random.default_rng(0)
         self.rp = Replayer(env_kw)
 
@@ -303,7 +318,9 @@ class MCTS:
             node, path = root, [root]
             while node.expanded and not node.terminal:
                 a, node = self._select(node, mm)
-                r, done = self.rp.step(a)
+                r, done, cut = self.rp.step(a)
+                if cut and self.trunc_penalty:
+                    r += truncation_penalty(r, self.gamma, self.trunc_penalty)
                 node.reward, node.terminal = r, done
                 path.append(node)
             g = 0.0 if node.terminal else self._expand(node)
