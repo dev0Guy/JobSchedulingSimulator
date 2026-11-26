@@ -71,6 +71,7 @@ Any adapter listed by `zig build run -- --list` works in `machines=` /
 | `illegal_penalty` | reward added for an illegal action | -1.0 |
 | `skip_empty` | fast-forward time while the pool is empty | `True` |
 | `drop_impossible` | drop jobs no machine can ever run | `True` |
+| `work_conserving` | mask "wait" whenever some job fits now (the agent cannot idle while work fits) | `False` |
 
 ### Observation — `Dict`, all `float32` in [0, 1]
 
@@ -80,6 +81,7 @@ Any adapter listed by `zig build run -- --list` works in `machines=` /
 | `jobs` | `(max_jobs, n_res, n_ticks)` | demand profile / max capacity, 0 for empty slots |
 | `valid` | `(max_jobs,)` | 1 if the slot holds a waiting job |
 | `wait` | `(max_jobs,)` | ticks waited / n_ticks, clipped to 1 |
+| `age` | `(max_jobs,)` | log(1 + ticks waited) / log(1 + n_ticks), not clipped: 1 at n_ticks, keeps growing |
 
 This is the DeepRM "image" representation: a job fits on a machine iff its
 `jobs[s]` grid is ≤ `machines[m]` everywhere on `[0, duration)`.

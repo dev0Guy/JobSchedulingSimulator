@@ -156,7 +156,8 @@ def main():
         net.eval()
         policies["ptr"] = lambda e, o, s, p: act_greedy(net, o, e.action_masks(), device)
         if args.sims:
-            mcts = MCTS(net, env_kw, device, sims=args.sims, gamma=tr["gamma"], reward_scale=tr["reward_scale"])
+            mcts = MCTS(net, env_kw, device, sims=args.sims, gamma=tr["gamma"], reward_scale=tr["reward_scale"],
+                        trunc_penalty=tr.get("trunc_penalty", 0.0))
             policies[f"ptr+mcts{args.sims}"] = (
                 lambda e, o, s, p: int(np.argmax(mcts.search(s, p, fingerprint(e), noise=False))))
 

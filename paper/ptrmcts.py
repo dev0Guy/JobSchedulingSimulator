@@ -63,7 +63,7 @@ ENV_KW = dict(
     # Hard episode limit. Without it a policy that keeps choosing "wait" never
     # ends the episode (and MCTS replay makes each step slower): training
     # would hang. A normal episode of 80 jobs ends in ~100-200 ticks.
-    max_ticks=1000,
+    max_ticks=2000,
 )
 
 # Seed ranges: training and evaluation never share a workload.
@@ -118,7 +118,10 @@ def make_env(**overrides) -> SchedEnv:
 def featurize(obs: dict) -> dict[str, np.ndarray]:
     """SchedEnv observation -> per-element feature arrays (unbatched)."""
     jobs = obs["jobs"].reshape(obs["jobs"].shape[0], -1)
-    jobs = np.concatenate([jobs, obs["wait"][:, None], obs["valid"][:, None]], axis=1)
+    # wait (clipped at n_ticks) + age (log scale, not clipped): without age a
+    # job waiting 30 ticks looked the same as one waiting 900, and the net
+    # learned to leave jobs unplaced for the rest of the episode
+    jobs = np.concatenate([jobs, obs["wait"][:, None], obs["age"][:, None], obs["valid"][:, None]], axis=1)
     mach = obs["machines"].reshape(obs["machines"].shape[0], -1)
     return {"jobs": jobs.astype(np.float32), "mach": mach.astype(np.float32),
             "valid": obs["valid"] > 0}
@@ -175,7 +178,7 @@ class PointerNet(nn.Module):
     @classmethod
     def for_env(cls, env: SchedEnv, **kw) -> "PointerNet":
         d = env.dims
-        return cls(d.n_res * d.n_ticks + 2, d.n_res * d.n_ticks, **kw)
+        return cls(d.n_res * d.n_ticks + 3, d.n_res * d.n_ticks, **kw)
 
 
 @torch.no_grad()
@@ -214,11 +217,31 @@ class Replayer:
             raise RuntimeError(f"replay diverged (seed {seed}): {self.fingerprint()} != {expect}. "
                                "The engine is not deterministic for this seed.")
 
-    def step(self, a: int) -> tuple[float, bool]:
+    def step(self, a: int) -> tuple[float, bool, bool]:
+        """-> (reward, done, cut off at max_ticks)."""
         if self.env._lib.sim_step(self.env._h, a, C.byref(self._res)) != 0:
             raise RuntimeError("search stepped past the end of the episode")
         r = self._res
-        return float(r.reward), bool(r.terminated or r.truncated)
+        trunc = bool(r.truncated) and not bool(r.terminated)
+        return float(r.reward), bool(r.terminated or r.truncated), trunc
+
+
+CUTOFF_CONST = 10.0
+
+
+def truncation_penalty(env, mult: float = 1.0) -> float:
+    """Extra reward for the step that hit max_ticks, read from `env` right
+    after that step. Every job still waiting is charged as if it were placed
+    only at the end of the simulation: its slowdown would be
+    (sim length + dur) / dur, plus a constant CUTOFF_CONST:
+
+        -mult * sum_j [ (now + dur_j) / dur_j + CUTOFF_CONST ]
+
+    Without it, a policy that never places some job pays only 1/dur per tick
+    until the cut, which looks cheap and teaches it to starve jobs."""
+    raw = env.raw()
+    dur = np.maximum(raw["duration"][raw["valid"]].astype(np.float64), 1.0)
+    return -mult * float(np.sum((raw["now"] + dur) / dur + CUTOFF_CONST))
 
 
 # ----------------------------------------------------------------------------- MCTS
@@ -258,8 +281,9 @@ class MCTS:
     for the value head's targets."""
 
     def __init__(self, net: PointerNet, env_kw: dict, device="cpu", sims: int = 32, c_puct: float = 1.5,
-                 gamma: float = 0.98, reward_scale: float = 10.0, dirichlet: float = 0.3,
-                 noise_frac: float = 0.25, rng: np.random.Generator | None = None):
+                 gamma: float = 0.999, reward_scale: float = 10.0, dirichlet: float = 0.3,
+                 noise_frac: float = 0.25, rng: np.random.Generator | None = None,
+                 trunc_penalty: float = 1.0):
         """`env_kw`: the exact SchedEnv config of the episodes searched (required:
         the search replays them on its own engine)."""
         if sims < 1:
@@ -267,6 +291,7 @@ class MCTS:
         self.net, self.device = net, device
         self.sims, self.c, self.gamma, self.scale = sims, c_puct, gamma, reward_scale
         self.dirichlet, self.noise_frac = dirichlet, noise_frac
+        self.trunc_penalty = trunc_penalty
         self.rng = rng or np.random.default_rng(0)
         self.rp = Replayer(env_kw)
 
@@ -303,7 +328,9 @@ class MCTS:
             node, path = root, [root]
             while node.expanded and not node.terminal:
                 a, node = self._select(node, mm)
-                r, done = self.rp.step(a)
+                r, done, cut = self.rp.step(a)
+                if cut and self.trunc_penalty:
+                    r += truncation_penalty(self.rp.env, self.trunc_penalty)
                 node.reward, node.terminal = r, done
                 path.append(node)
             g = 0.0 if node.terminal else self._expand(node)

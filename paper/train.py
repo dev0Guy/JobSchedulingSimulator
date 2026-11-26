@@ -31,7 +31,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ptrmcts import MCTS, PointerNet, atomic_write, collate, env_config, featurize, fingerprint, train_seed_range
+from ptrmcts import (MCTS, PointerNet, atomic_write, collate, env_config, featurize, fingerprint,
+                     train_seed_range, truncation_penalty)
 from sched_env import SchedEnv
 
 
@@ -43,21 +44,25 @@ def discounted(rewards: list[float], gamma: float, scale: float) -> list[float]:
     return out[::-1]
 
 
-def run_episode(env, seed, choose, gamma, scale):
+def run_episode(env, seed, choose, gamma, scale, trunc_penalty=1.0):
     """Play one episode; `choose(obs, mask, prefix, expect, step)` -> (action, π)."""
     obs, _ = env.reset(seed=seed)
     samples, rewards, prefix = [], [], []
+    raw = 0.0  # true episode return (logged), without the cut-off penalty
     done = False
     while not done:
         mask = env.action_masks()
         a, pi = choose(obs, mask, prefix, fingerprint(env), len(prefix))
         samples.append((featurize(obs), mask, pi))
         obs, r, term, trunc, info = env.step(a)
+        raw += r
+        if trunc and not term and trunc_penalty:
+            r += truncation_penalty(env, trunc_penalty)  # training target only
         rewards.append(r)
         prefix.append(a)
         done = term or trunc
     rets = discounted(rewards, gamma, scale)
-    return [(f, m, p, g) for (f, m, p), g in zip(samples, rets)], info["stats"], sum(rewards)
+    return [(f, m, p, g) for (f, m, p), g in zip(samples, rets)], info["stats"], raw
 
 
 def train_step(net, opt, batch, device, value_coef):
@@ -102,7 +107,8 @@ def self_play_episode(job):
         _W["net"].load_state_dict(state)
     env, net = _W["env"], _W["net"]
     rng = np.random.default_rng([a["seed"], seed])
-    mcts = MCTS(net, _W["env_kw"], "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng)
+    mcts = MCTS(net, _W["env_kw"], "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng,
+                trunc_penalty=a["trunc_penalty"])
 
     def choose(obs, mask, prefix, expect, step):
         counts = mcts.search(seed, prefix, expect, noise=True)
@@ -111,7 +117,7 @@ def self_play_episode(job):
         return act, pi
 
     with torch.no_grad():
-        return run_episode(env, seed, choose, a["gamma"], a["reward_scale"])
+        return run_episode(env, seed, choose, a["gamma"], a["reward_scale"], a["trunc_penalty"])
 
 
 def fit(net, opt, buffer, args, device, rng):
@@ -141,7 +147,11 @@ def main():
     ap.add_argument("--buffer", type=int, default=20_000)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--value-coef", type=float, default=0.5)
-    ap.add_argument("--gamma", type=float, default=0.98)
+    ap.add_argument("--gamma", type=float, default=0.999,
+                    help="discount; close to 1 so a job left waiting stays expensive (0.98 taught starvation)")
+    ap.add_argument("--trunc-penalty", type=float, default=1.0,
+                    help="multiplier of the max_ticks cut-off penalty: every job still waiting is charged "
+                         "(sim length + dur)/dur + 10, as if placed at the end; 0 disables")
     ap.add_argument("--reward-scale", type=float, default=10.0)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--psplib", default=None,
@@ -183,7 +193,7 @@ def main():
 
         data = []
         for _ in range(args.bc_episodes):
-            d, _, _ = run_episode(env, next(seeds), teacher, args.gamma, args.reward_scale)
+            d, _, _ = run_episode(env, next(seeds), teacher, args.gamma, args.reward_scale, args.trunc_penalty)
             data += d
         for ep in range(args.bc_epochs):
             perm = rng.permutation(len(data))
