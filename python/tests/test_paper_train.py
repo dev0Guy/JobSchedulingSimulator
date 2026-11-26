@@ -38,3 +38,26 @@ def test_cut_off_episode_gets_penalty_but_logged_return_does_not():
     assert ret0 == pytest.approx(ret1)                      # logged return: true reward only
     assert s1[0][3] < s0[0][3] - 1.0                        # training target: much worse
     env.close()
+
+
+def test_work_conserving_mask_blocks_wait_only_when_a_job_fits():
+    from sched_env import SchedEnv
+    kw = dict(machines="deeprm:n=1", jobs="poisson:n=40,rate=0.8", n_res=2, n_ticks=20, max_jobs=40,
+              reward="slowdown", max_ticks=1000)
+    env, ref = SchedEnv(**kw, work_conserving=True), SchedEnv(**kw)
+    env.reset(seed=3), ref.reset(seed=3)
+    rng = np.random.default_rng(0)
+    seen_blocked = seen_free = False
+    done = False
+    while not done:
+        m, r = env.action_masks(), ref.action_masks()
+        assert (m[:-1] == r[:-1]).all()            # placements unchanged
+        assert m[-1] == (r[-1] and not r[:-1].any())  # wait only when nothing fits
+        seen_blocked |= r[:-1].any()
+        seen_free |= not r[:-1].any()
+        a = int(rng.choice(np.flatnonzero(m)))
+        done = any(env.step(a)[2:4])
+        ref.step(a)
+    assert seen_blocked and seen_free
+    env.close(), ref.close()
+

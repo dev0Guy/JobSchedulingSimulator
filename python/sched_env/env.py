@@ -27,6 +27,9 @@ class SchedEnv(gym.Env):
 
     `action_masks()` returns the legal actions (used by sb3_contrib MaskablePPO).
     Illegal actions are penalized (`illegal_penalty`) and treated as wait.
+    `work_conserving=True` masks wait whenever some placement is legal, so a
+    policy cannot leave a job waiting while it fits now (mask only: the
+    engine itself still accepts wait).
     """
 
     metadata = {"render_modes": ["ansi"]}
@@ -43,6 +46,7 @@ class SchedEnv(gym.Env):
         illegal_penalty: float = -1.0,
         skip_empty: bool = True,
         drop_impossible: bool = True,
+        work_conserving: bool = False,
         render_mode: str | None = None,
     ):
         self._lib = _lib.load()
@@ -58,6 +62,7 @@ class SchedEnv(gym.Env):
         self._lib.sim_dims(self._h, C.byref(d))
         self.dims = d
         self.render_mode = render_mode
+        self.work_conserving = work_conserving
 
         # zero-copy views into engine memory (always current)
         self._mptr = self._lib.sim_machines_ptr(self._h)
@@ -97,7 +102,10 @@ class SchedEnv(gym.Env):
 
     def action_masks(self) -> np.ndarray:
         self._lib.sim_action_mask(self._h, self._mask.ctypes.data)
-        return self._mask.astype(bool)
+        m = self._mask.astype(bool)
+        if self.work_conserving and m[:-1].any():
+            m[-1] = False  # some job fits now: waiting is not allowed
+        return m
 
     def render(self):
         s = self.stats()

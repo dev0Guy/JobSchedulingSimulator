@@ -71,6 +71,7 @@ Any adapter listed by `zig build run -- --list` works in `machines=` /
 | `illegal_penalty` | reward added for an illegal action | -1.0 |
 | `skip_empty` | fast-forward time while the pool is empty | `True` |
 | `drop_impossible` | drop jobs no machine can ever run | `True` |
+| `work_conserving` | mask "wait" whenever some job fits now (the agent cannot idle while work fits) | `False` |
 
 ### Observation — `Dict`, all `float32` in [0, 1]
 
