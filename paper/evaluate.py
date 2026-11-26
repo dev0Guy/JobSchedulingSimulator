@@ -151,7 +151,7 @@ def main():
 
     policies = {name: (lambda e, o, s, p, n=name: e.policy_action(n)) for name in args.policies.split(",") if name}
     if ck:
-        net = PointerNet.for_env(env, d=ck["d_model"]).to(device)
+        net = PointerNet.for_env(env, **ck.get("net", {"d": ck["d_model"], "layers": 2})).to(device)
         net.load_state_dict(ck["model"])
         net.eval()
         policies["ptr"] = lambda e, o, s, p: act_greedy(net, o, e.action_masks(), device)

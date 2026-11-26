@@ -92,11 +92,11 @@ def train_step(net, opt, batch, device, value_coef):
 _W: dict = {}
 
 
-def _worker_init(env_kw: dict, d_model: int, threads: int):
+def _worker_init(env_kw: dict, net_kw: dict, threads: int):
     torch.set_num_threads(threads)
     env = SchedEnv(**env_kw)
     _W["env"], _W["env_kw"] = env, env_kw
-    _W["net"] = PointerNet.for_env(env, d=d_model).eval()
+    _W["net"] = PointerNet.for_env(env, **net_kw).eval()
 
 
 def self_play_episode(job):
@@ -153,7 +153,8 @@ def main():
                     help="multiplier of the max_ticks cut-off penalty: every job still waiting is charged "
                          "(sim length + dur)/dur + 10, as if placed at the end; 0 disables")
     ap.add_argument("--reward-scale", type=float, default=10.0)
-    ap.add_argument("--d-model", type=int, default=128)
+    ap.add_argument("--d-model", type=int, default=64)
+    ap.add_argument("--layers", type=int, default=1, help="transformer encoder layers")
     ap.add_argument("--psplib", default=None,
                     help="take job profiles from PSPLIB instances (.sm file or directory) instead of DeepRM")
     ap.add_argument("--seed", type=int, default=0)
@@ -174,7 +175,8 @@ def main():
 
     env_kw = env_config(args.psplib)
     env = SchedEnv(**env_kw)
-    net = PointerNet.for_env(env, d=args.d_model).to(device)
+    net_kw = {"d": args.d_model, "layers": args.layers}
+    net = PointerNet.for_env(env, **net_kw).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     buffer = collections.deque(maxlen=args.buffer)
     out = Path(args.out)
@@ -208,9 +210,9 @@ def main():
     # 2-3. self-play + training ------------------------------------------------
     cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 2)
     workers = args.workers or max(1, cpus - 1)  # affinity: only the CPUs SLURM/taskset gave us
-    pool = (mp.get_context("spawn").Pool(workers, _worker_init, (env_kw, args.d_model, 1)) if workers > 1 else None)
+    pool = (mp.get_context("spawn").Pool(workers, _worker_init, (env_kw, net_kw, 1)) if workers > 1 else None)
     if pool is None:
-        _worker_init(env_kw, args.d_model, torch.get_num_threads())
+        _worker_init(env_kw, net_kw, torch.get_num_threads())
     print(f"self-play: {workers} worker(s), training on {device}")
     for it in range(args.iters):
         t0 = time.time()
@@ -228,7 +230,7 @@ def main():
                "policy_loss": pl, "value_loss": vl, "buffer": len(buffer), "sec": round(time.time() - t0, 1)}
         log.append(rec)
         print(json.dumps(rec))
-        ck = {"model": net.state_dict(), "d_model": args.d_model, "env": env_kw, "args": vars(args), "log": log}
+        ck = {"model": net.state_dict(), "d_model": args.d_model, "net": net_kw, "env": env_kw, "args": vars(args), "log": log}
         atomic_write(out, lambda p: torch.save(ck, p))
     if pool:
         pool.close()

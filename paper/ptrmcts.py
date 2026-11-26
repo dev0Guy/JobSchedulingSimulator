@@ -138,12 +138,39 @@ def collate(feats: list[dict], masks: list[np.ndarray], device) -> tuple:
 # ----------------------------------------------------------------------------- model
 
 
-class PointerNet(nn.Module):
-    def __init__(self, job_dim: int, mach_dim: int, d: int = 128, heads: int = 4, layers: int = 2):
+JOB_EXTRA = 3  # per-job scalars after the demand grid: wait, age, valid (see featurize)
+
+
+class GridEncoder(nn.Module):
+    """Shared encoder of an (n_res, n_ticks) grid -- a job's demand or a
+    machine's free capacity. A Conv2d with kernel 1 x n_ticks reads each
+    resource's whole time row with the same filters (weights shared across
+    resources), giving `channels` features per resource; an MLP mixes the
+    n_res x channels features into one vector of size d."""
+
+    def __init__(self, n_res: int, n_ticks: int, d: int, channels: int = 32):
         super().__init__()
-        self.d = d
-        self.job_in = nn.Sequential(nn.Linear(job_dim, d), nn.ReLU(), nn.Linear(d, d))
-        self.mach_in = nn.Sequential(nn.Linear(mach_dim, d), nn.ReLU(), nn.Linear(d, d))
+        self.n_res, self.n_ticks = n_res, n_ticks
+        self.conv = nn.Conv2d(1, channels, kernel_size=(1, n_ticks))
+        self.mlp = nn.Sequential(nn.Linear(n_res * channels, d), nn.ReLU(), nn.Linear(d, d))
+
+    def forward(self, grid):  # (B, N, n_res*n_ticks) -> (B, N, d)
+        B, N, _ = grid.shape
+        x = grid.reshape(B * N, 1, self.n_res, self.n_ticks)
+        x = torch.relu(self.conv(x))            # (B*N, C, n_res, 1)
+        return self.mlp(x.flatten(1)).reshape(B, N, -1)
+
+
+class PointerNet(nn.Module):
+    def __init__(self, n_res: int, n_ticks: int, d: int = 64, heads: int = 4, layers: int = 1,
+                 channels: int = 32):
+        super().__init__()
+        self.d, self.grid_len = d, n_res * n_ticks
+        # jobs and machines share the grid encoder and the token projection;
+        # a job's token also sees its JOB_EXTRA scalars (zeros for machines),
+        # and the type embedding tells the two apart
+        self.grid = GridEncoder(n_res, n_ticks, d, channels)
+        self.token = nn.Linear(d + JOB_EXTRA, d)  # merges the scalars in; one layer is enough
         self.type_emb = nn.Parameter(torch.zeros(2, d))  # job / machine
         layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.0, batch_first=True)
         self.enc = nn.TransformerEncoder(layer, layers)
@@ -163,7 +190,10 @@ class PointerNet(nn.Module):
         -> logits (B,J·M+1) with illegal = -inf, value (B,)"""
         B, J, _ = jobs.shape
         M = mach.shape[1]
-        x = torch.cat([self.job_in(jobs) + self.type_emb[0], self.mach_in(mach) + self.type_emb[1]], 1)
+        G = self.grid_len
+        tj = self.token(torch.cat([self.grid(jobs[..., :G]), jobs[..., G:]], -1))
+        tm = self.token(torch.cat([self.grid(mach), mach.new_zeros(B, M, JOB_EXTRA)], -1))
+        x = torch.cat([tj + self.type_emb[0], tm + self.type_emb[1]], 1)
         pad = torch.cat([~valid, torch.zeros(B, M, dtype=torch.bool, device=jobs.device)], 1)
         h = self.enc(x, src_key_padding_mask=pad)
         q, _ = self.glimpse(self.q0.expand(B, 1, self.d), h, h, key_padding_mask=pad)
@@ -178,7 +208,7 @@ class PointerNet(nn.Module):
     @classmethod
     def for_env(cls, env: SchedEnv, **kw) -> "PointerNet":
         d = env.dims
-        return cls(d.n_res * d.n_ticks + 3, d.n_res * d.n_ticks, **kw)
+        return cls(d.n_res, d.n_ticks, **kw)
 
 
 @torch.no_grad()

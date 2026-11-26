@@ -89,3 +89,32 @@ def test_age_keeps_growing_after_wait_clips():
     from ptrmcts import featurize
     assert featurize(obs)["jobs"].shape[1] == env.dims.n_res * env.dims.n_ticks + 3
     env.close()
+
+
+def test_pointer_net_shared_grid_encoder():
+    import torch
+    from ptrmcts import JOB_EXTRA, PointerNet, collate, featurize
+    env = make_env()
+    obs, _ = env.reset(seed=2)
+    net = PointerNet.for_env(env).eval()
+    d = env.dims
+    assert net.grid.conv.kernel_size == (1, d.n_ticks)       # one time row per resource
+    # one encoder for both: the same grid gives the same embedding
+    g = torch.rand(1, 1, d.n_res * d.n_ticks)
+    assert torch.equal(net.grid(g), net.grid(g.clone()))
+    assert not any("job_in" in k or "mach_in" in k for k, _ in net.named_parameters())
+    # logits cover every (job, machine) pair + wait; jobs are a set
+    f = featurize(obs)
+    assert f["jobs"].shape[1] == d.n_res * d.n_ticks + JOB_EXTRA
+    mask = env.action_masks()
+    with torch.no_grad():
+        logits, v = net(*collate([f], [mask], "cpu"))
+        perm = np.random.default_rng(0).permutation(d.max_jobs)
+        fp = {"jobs": f["jobs"][perm], "mach": f["mach"], "valid": f["valid"][perm]}
+        mp = np.concatenate([mask[:-1].reshape(d.max_jobs, -1)[perm].ravel(), mask[-1:]])
+        lp, vp = net(*collate([fp], [mp], "cpu"))
+    assert logits.shape == (1, d.n_actions)
+    lj = logits[0, :-1].reshape(d.max_jobs, -1)[perm]
+    assert torch.allclose(lj, lp[0, :-1].reshape(d.max_jobs, -1), atol=1e-4, equal_nan=True)
+    assert torch.allclose(v, vp, atol=1e-4)
+    env.close()
