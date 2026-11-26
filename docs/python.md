@@ -81,6 +81,7 @@ Any adapter listed by `zig build run -- --list` works in `machines=` /
 | `jobs` | `(max_jobs, n_res, n_ticks)` | demand profile / max capacity, 0 for empty slots |
 | `valid` | `(max_jobs,)` | 1 if the slot holds a waiting job |
 | `wait` | `(max_jobs,)` | ticks waited / n_ticks, clipped to 1 |
+| `age` | `(max_jobs,)` | log(1 + ticks waited) / log(1 + n_ticks), not clipped: 1 at n_ticks, keeps growing |
 
 This is the DeepRM "image" representation: a job fits on a machine iff its
 `jobs[s]` grid is ≤ `machines[m]` everywhere on `[0, duration)`.

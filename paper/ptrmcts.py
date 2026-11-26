@@ -118,7 +118,10 @@ def make_env(**overrides) -> SchedEnv:
 def featurize(obs: dict) -> dict[str, np.ndarray]:
     """SchedEnv observation -> per-element feature arrays (unbatched)."""
     jobs = obs["jobs"].reshape(obs["jobs"].shape[0], -1)
-    jobs = np.concatenate([jobs, obs["wait"][:, None], obs["valid"][:, None]], axis=1)
+    # wait (clipped at n_ticks) + age (log scale, not clipped): without age a
+    # job waiting 30 ticks looked the same as one waiting 900, and the net
+    # learned to leave jobs unplaced for the rest of the episode
+    jobs = np.concatenate([jobs, obs["wait"][:, None], obs["age"][:, None], obs["valid"][:, None]], axis=1)
     mach = obs["machines"].reshape(obs["machines"].shape[0], -1)
     return {"jobs": jobs.astype(np.float32), "mach": mach.astype(np.float32),
             "valid": obs["valid"] > 0}
@@ -175,7 +178,7 @@ class PointerNet(nn.Module):
     @classmethod
     def for_env(cls, env: SchedEnv, **kw) -> "PointerNet":
         d = env.dims
-        return cls(d.n_res * d.n_ticks + 2, d.n_res * d.n_ticks, **kw)
+        return cls(d.n_res * d.n_ticks + 3, d.n_res * d.n_ticks, **kw)
 
 
 @torch.no_grad()

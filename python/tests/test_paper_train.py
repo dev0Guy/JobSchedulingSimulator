@@ -61,3 +61,21 @@ def test_work_conserving_mask_blocks_wait_only_when_a_job_fits():
     assert seen_blocked and seen_free
     env.close(), ref.close()
 
+
+
+def test_age_keeps_growing_after_wait_clips():
+    env = make_env(max_ticks=200)
+    obs, _ = env.reset(seed=1)
+    wait_a = env.dims.n_actions - 1
+    first = None
+    for t in range(60):
+        if obs["valid"].any() and first is None:
+            first = int(np.flatnonzero(obs["valid"])[0])
+        obs, *_ = env.step(wait_a)  # never place anything
+        if first is not None and t == 30:
+            w30, a30 = obs["wait"][first], obs["age"][first]
+    assert w30 == obs["wait"][first] == 1.0           # wait saturates at n_ticks
+    assert obs["age"][first] > a30 > 1.0              # age does not
+    from ptrmcts import featurize
+    assert featurize(obs)["jobs"].shape[1] == env.dims.n_res * env.dims.n_ticks + 3
+    env.close()

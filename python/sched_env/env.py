@@ -20,6 +20,9 @@ class SchedEnv(gym.Env):
       jobs      (max_jobs,   n_res, n_ticks)  demand / max_cap (0 = empty slot)
       valid     (max_jobs,)                   1 if the slot holds a waiting job
       wait      (max_jobs,)                   ticks waited / n_ticks, clipped to 1
+      age       (max_jobs,)                   log(1 + ticks waited) / log(1 + n_ticks):
+                                              1 at n_ticks, not clipped (2.3 at 1000
+                                              for n_ticks 20), so long waits stay visible
 
     Action: Discrete(max_jobs * n_machines + 1)
       a <  max_jobs*n_machines -> place job slot a // n_machines on machine a % n_machines
@@ -79,6 +82,7 @@ class SchedEnv(gym.Env):
             "jobs": spaces.Box(0, 1, (d.max_jobs, d.n_res, d.n_ticks), np.float32),
             "valid": spaces.Box(0, 1, (d.max_jobs,), np.float32),
             "wait": spaces.Box(0, 1, (d.max_jobs,), np.float32),
+            "age": spaces.Box(0, np.inf, (d.max_jobs,), np.float32),
         })
 
     # ------------------------------------------------------------------ gym API
@@ -176,10 +180,13 @@ class SchedEnv(gym.Env):
         self._lib.sim_slot_valid(self._h, self._valid.ctypes.data)
         now = self._lib.sim_now(self._h)
         valid = self._valid.astype(np.float32)
-        wait = np.clip((now - self._arrival) / self.dims.n_ticks, 0, 1).astype(np.float32) * valid
+        ticks = np.maximum(now - self._arrival, 0).astype(np.float64)
+        wait = np.clip(ticks / self.dims.n_ticks, 0, 1).astype(np.float32) * valid
+        age = (np.log1p(ticks) / np.log1p(self.dims.n_ticks)).astype(np.float32) * valid
         return {
             "machines": self._machines.astype(np.float32) * self._scale,
             "jobs": self._jobs.astype(np.float32) * self._scale,
             "valid": valid,
             "wait": wait,
+            "age": age,
         }
