@@ -158,3 +158,16 @@ def test_batched_search_matches_visit_budget():
         assert (c[~env.action_masks()] == 0).all()           # only legal actions
         assert np.isfinite(mc.root_value)
     env.close()
+
+
+def test_fit_mixes_fixed_teacher_share_into_every_batch(monkeypatch):
+    import types
+    import train
+    seen = []
+    monkeypatch.setattr(train, "train_step", lambda net, opt, batch, dev, vc: (seen.append(batch), (0.0, 0.0))[1])
+    args = types.SimpleNamespace(batch=8, updates=3, bc_mix=0.25, value_coef=0.5)
+    buffer, anchor = [("self",)] * 20, [("teacher",)] * 5
+    train.fit(None, None, buffer, args, "cpu", np.random.default_rng(0), anchor)
+    assert len(seen) == 3
+    for b in seen:
+        assert len(b) == 8 and sum(x == ("teacher",) for x in b) == 2
