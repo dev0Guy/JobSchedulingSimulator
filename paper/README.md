@@ -67,6 +67,14 @@ The engine cannot be cloned. Each simulation therefore restores the root state w
 
 All randomness is seeded from `--seed`. Training episode e uses seed `seed·10⁶ + e`.
 
+## PPO baseline
+
+`paper/ppo.py` trains sb3-contrib's MaskablePPO (flattened observation → MLP,
+illegal actions masked) on the same env, reward scale and cut-off penalty.
+Evaluate it next to everything else with
+`python paper/evaluate.py paper/out/ptr.pt --ppo paper/out/ppo.zip`; its
+training seeds (block `--seed`, default 1) are checked against the eval seeds.
+
 ## Running fast (GPU / many-core machine)
 
 Self-play MCTS evaluates one state at a time and replays the engine on the

@@ -171,3 +171,18 @@ def test_fit_mixes_fixed_teacher_share_into_every_batch(monkeypatch):
     assert len(seen) == 3
     for b in seen:
         assert len(b) == 8 and sum(x == ("teacher",) for x in b) == 2
+
+
+def test_ppo_train_env_uses_training_seeds_and_scales_reward():
+    from ppo import TrainEnv
+    from ptrmcts import ENV_KW, EVAL_SEED_START, train_seed_range
+    seeds = train_seed_range(1, 100)
+    env = TrainEnv(dict(ENV_KW), seeds, offset=3, stride=2, scale=10.0, trunc_penalty=0.0)
+    ref = make_env()
+    obs, _ = env.reset()
+    ref_obs, _ = ref.reset(seed=seeds[3])
+    assert np.array_equal(obs["jobs"], ref_obs["jobs"]) and seeds[3] < EVAL_SEED_START
+    a = int(np.flatnonzero(env.action_masks())[0])
+    _, r, *_ = env.step(a)
+    _, r_ref, *_ = ref.step(a)
+    assert r == pytest.approx(r_ref / 10.0)

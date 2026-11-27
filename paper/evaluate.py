@@ -122,6 +122,7 @@ def main():
     ap.add_argument("--policies", default=",".join(BUILTIN))
     ap.add_argument("--max-ticks", type=int, default=2000,
                     help="end (truncate) an episode after this many ticks; counted in the 'truncated' column")
+    ap.add_argument("--ppo", default=None, help="also evaluate a MaskablePPO model from ppo.py (.zip)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="paper/out/eval.json")
     args = ap.parse_args()
@@ -143,7 +144,16 @@ def main():
         overlap = [s for s in seeds if s in used]
         if overlap:
             raise SystemExit(f"evaluation seeds {overlap[0]}.. were used in training ({used.start}..{used.stop - 1})")
-    env_kw = dict(ck["env"] if ck else ENV_KW)
+    ppo_meta = None
+    if args.ppo:
+        ppo_meta = json.loads(Path(args.ppo).with_suffix(".json").read_text())
+        lo, hi = ppo_meta["seeds"]
+        overlap = [s for s in seeds if lo <= s < hi]
+        if overlap:
+            raise SystemExit(f"evaluation seeds {overlap[0]}.. were used in PPO training ({lo}..{hi - 1})")
+        if ck and ppo_meta["env"] != ck["env"]:
+            raise SystemExit("ptr checkpoint and PPO model were trained on different envs")
+    env_kw = dict(ck["env"] if ck else ppo_meta["env"] if ppo_meta else ENV_KW)
     # a policy that keeps choosing "wait" would otherwise never end the episode;
     # every job has arrived long before this, so the cap does not change the workload
     env_kw["max_ticks"] = env_kw.get("max_ticks") or args.max_ticks
@@ -160,6 +170,11 @@ def main():
                         trunc_penalty=tr.get("trunc_penalty", 0.0))
             policies[f"ptr+mcts{args.sims}"] = (
                 lambda e, o, s, p: int(np.argmax(mcts.search(s, p, fingerprint(e), noise=False))))
+
+    if args.ppo:
+        from sb3_contrib import MaskablePPO
+        ppo = MaskablePPO.load(args.ppo, device=args.device)
+        policies["ppo"] = lambda e, o, s, p: int(ppo.predict(o, action_masks=e.action_masks(), deterministic=True)[0])
 
     results = {name: [] for name in policies}
     checks = {"workload_mismatch": [], "nondeterministic": []}
