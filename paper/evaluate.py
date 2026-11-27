@@ -37,7 +37,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ptrmcts import (ENV_KW, EVAL_SEED_START, MCTS, PointerNet, act_greedy, atomic_write, fingerprint,
+from tournament import tournament_action
+
+from ptrmcts import (ENV_KW, EVAL_SEED_START, MCTS, PointerNet, act_greedy, atomic_write, fingerprint, with_jobs,
                      train_seed_range)
 from sched_env import SchedEnv
 
@@ -122,6 +124,9 @@ def main():
     ap.add_argument("--policies", default=",".join(BUILTIN))
     ap.add_argument("--max-ticks", type=int, default=2000,
                     help="end (truncate) an episode after this many ticks; counted in the 'truncated' column")
+    ap.add_argument("--jobs", type=int, default=None,
+                    help="evaluate on this many jobs per episode; a PPO model trained on fewer job slots "
+                         "picks actions by tournament (paper/tournament.py)")
     ap.add_argument("--ppo", default=None, help="also evaluate a MaskablePPO model from ppo.py (.zip)")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="paper/out/eval.json")
@@ -151,9 +156,9 @@ def main():
         overlap = [s for s in seeds if lo <= s < hi]
         if overlap:
             raise SystemExit(f"evaluation seeds {overlap[0]}.. were used in PPO training ({lo}..{hi - 1})")
-        if ck and ppo_meta["env"] != ck["env"]:
-            raise SystemExit("ptr checkpoint and PPO model were trained on different envs")
-    env_kw = dict(ck["env"] if ck else ppo_meta["env"] if ppo_meta else ENV_KW)
+        if ck and args.jobs is None and ppo_meta["env"] != ck["env"]:
+            raise SystemExit("ptr checkpoint and PPO model were trained on different envs (pass --jobs)")
+    env_kw = with_jobs(ck["env"] if ck else ppo_meta["env"] if ppo_meta else ENV_KW, args.jobs)
     # a policy that keeps choosing "wait" would otherwise never end the episode;
     # every job has arrived long before this, so the cap does not change the workload
     env_kw["max_ticks"] = env_kw.get("max_ticks") or args.max_ticks
@@ -174,7 +179,20 @@ def main():
     if args.ppo:
         from sb3_contrib import MaskablePPO
         ppo = MaskablePPO.load(args.ppo, device=args.device)
-        policies["ppo"] = lambda e, o, s, p: int(ppo.predict(o, action_masks=e.action_masks(), deterministic=True)[0])
+        W = ppo_meta["env"]["max_jobs"]
+        if W >= env_kw["max_jobs"]:
+            policies["ppo"] = lambda e, o, s, p: int(ppo.predict(o, action_masks=e.action_masks(), deterministic=True)[0])
+        else:  # trained on W job slots: tournament over groups of W
+            from stable_baselines3.common.utils import obs_as_tensor
+
+            def probs(o, m):
+                t = {k: v[None] for k, v in obs_as_tensor(o, ppo.device).items()}
+                with torch.no_grad():
+                    d = ppo.policy.get_distribution(t, action_masks=m[None])
+                return d.distribution.probs[0].cpu().numpy()
+
+            M = env.dims.n_machines
+            policies[f"ppo_tour{W}"] = lambda e, o, s, p: tournament_action(probs, o, e.action_masks(), W, M)
 
     results = {name: [] for name in policies}
     checks = {"workload_mismatch": [], "nondeterministic": []}

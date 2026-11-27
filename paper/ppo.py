@@ -29,7 +29,7 @@ import torch
 from sb3_contrib.common.maskable.distributions import MaskableCategoricalDistribution
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
-from ptrmcts import TRAIN_SEED_BLOCK, PointerNet, env_config, train_seed_range, truncation_penalty
+from ptrmcts import TRAIN_SEED_BLOCK, PointerNet, env_config, with_jobs, train_seed_range, truncation_penalty
 from sched_env import SchedEnv
 
 
@@ -133,6 +133,8 @@ def main():
     ap.add_argument("--reward-scale", type=float, default=10.0)
     ap.add_argument("--trunc-penalty", type=float, default=1.0)
     ap.add_argument("--psplib", default=None)
+    ap.add_argument("--jobs", type=int, default=None,
+                    help="jobs per episode (= job slots); evaluate on more with evaluate.py --jobs (tournament)")
     ap.add_argument("--seed", type=int, default=1, help="training seed block (seed·10⁶ ...)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--out", default="paper/out/ppo.zip")
@@ -141,7 +143,7 @@ def main():
     from sb3_contrib import MaskablePPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-    env_kw = env_config(args.psplib)
+    env_kw = with_jobs(env_config(args.psplib), args.jobs)
     seeds = train_seed_range(args.seed, TRAIN_SEED_BLOCK)
     venv = DummyVecEnv([
         (lambda i=i: TrainEnv(env_kw, seeds, i, args.envs, args.reward_scale, args.trunc_penalty))

@@ -76,6 +76,11 @@ Evaluate it next to everything else with
 `python paper/evaluate.py paper/out/ptr.pt --ppo paper/out/ppo.zip`; its
 training seeds (block `--seed`, default 1) are checked against the eval seeds.
 
+Tournament (evaluation only): train on few slots (`ppo.py --jobs 10`), then
+`evaluate.py --ppo ... --jobs 25` runs the same weights on 25 jobs: placeable
+jobs are split into groups of 10 (padded, masked), each group's best job
+advances, and a final round over the winners picks the action (`ppo_tour10`).
+
 ## Running fast (GPU / many-core machine)
 
 Self-play MCTS evaluates one state at a time and replays the engine on the

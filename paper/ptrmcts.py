@@ -108,6 +108,16 @@ def env_config(psplib: str | None = None) -> dict:
     return {**ENV_KW, "machines": f"psplib:path={path},n=1", "n_res": 4}
 
 
+def with_jobs(env_kw: dict, n: int | None) -> dict:
+    """env_kw with n jobs per episode and n job slots (unchanged if n is None)."""
+    if n is None:
+        return dict(env_kw)
+    kind, _, params = env_kw["jobs"].partition(":")
+    kv = dict(p.split("=") for p in params.split(",") if p)
+    kv["n"] = str(n)
+    return {**env_kw, "jobs": f"{kind}:" + ",".join(f"{k}={v}" for k, v in kv.items()), "max_jobs": n}
+
+
 def make_env(**overrides) -> SchedEnv:
     return SchedEnv(**{**ENV_KW, **overrides})
 

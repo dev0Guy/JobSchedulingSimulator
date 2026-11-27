@@ -203,3 +203,25 @@ def test_ppo_ptr_policy_only_picks_legal_actions():
         obs, _, term, trunc, _ = env.step(int(a))
         if term or trunc:
             break
+
+
+def test_tournament_groups_pad_and_maps_back():
+    from tournament import tournament_action, window_mask, window_obs
+    W, M, J = 10, 1, 25
+    rng = np.random.default_rng(0)
+    obs = {"jobs": rng.random((J, 2, 4)).astype(np.float32), "valid": np.ones(J, np.float32),
+           "wait": np.zeros(J, np.float32), "age": np.arange(J, dtype=np.float32), "machines": np.zeros((1, 2, 4))}
+    mask = np.ones(J * M + 1, bool)
+    calls = []
+
+    def probs(o, m):  # prefers the job with the largest age; padded slots must be masked
+        calls.append(int(m[:-1].sum()))
+        assert o["jobs"].shape[0] == W and not o["valid"][int(m[:-1].sum()):].any()
+        p = np.where(m[:-1], o["age"] + 1, 0)
+        return np.append(p, 0.0) / p.sum()
+
+    assert tournament_action(probs, obs, mask, W, M) == 24
+    assert calls == [10, 10, 5, 3]  # groups 10,10,5 then a final round of 3 winners
+    wm = window_mask(mask, np.array([3, 7]), W, M)
+    assert wm[:2].all() and not wm[2:-1].any() and wm[-1]
+    assert window_obs(obs, np.array([3, 7]), W)["age"][:2].tolist() == [3, 7]
