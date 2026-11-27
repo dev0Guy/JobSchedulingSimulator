@@ -186,3 +186,20 @@ def test_ppo_train_env_uses_training_seeds_and_scales_reward():
     _, r, *_ = env.step(a)
     _, r_ref, *_ = ref.step(a)
     assert r == pytest.approx(r_ref / 10.0)
+
+
+def test_ppo_ptr_policy_only_picks_legal_actions():
+    import torch
+    from ppo import PtrPolicy
+    from stable_baselines3.common.utils import obs_as_tensor
+    env = make_env()
+    pol = PtrPolicy(env.observation_space, env.action_space, lambda _: 1e-4, ptr_kw={"d": 32})
+    obs, _ = env.reset(seed=3)
+    for _ in range(30):
+        mask = env.action_masks()
+        o = {k: v[None] for k, v in obs_as_tensor(obs, "cpu").items()}
+        a, v, lp = pol(o, action_masks=mask[None])
+        assert mask[int(a)] and torch.isfinite(lp).all() and v.shape == (1, 1)
+        obs, _, term, trunc, _ = env.step(int(a))
+        if term or trunc:
+            break

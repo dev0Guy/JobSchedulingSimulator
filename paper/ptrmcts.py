@@ -52,7 +52,7 @@ from sched_env import _lib  # noqa: E402
 # The waiting pool has one slot per job in the episode, so it can never be
 # full: no job is rejected and the model always sees every waiting job (the
 # pointer network handles any number of jobs; empty slots are masked).
-N_JOBS = 80
+N_JOBS = 20
 ENV_KW = dict(
     machines="deeprm:n=1",
     jobs=f"poisson:n={N_JOBS},rate=0.8",
@@ -62,7 +62,7 @@ ENV_KW = dict(
     reward="slowdown",
     # Hard episode limit. Without it a policy that keeps choosing "wait" never
     # ends the episode (and MCTS replay makes each step slower): training
-    # would hang. A normal episode of 80 jobs ends in ~100-200 ticks.
+    # would hang. A normal episode ends long before this.
     max_ticks=2000,
 )
 
