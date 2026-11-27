@@ -32,7 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from ptrmcts import (MCTS, PointerNet, atomic_write, collate, env_config, featurize, fingerprint,
-                     train_seed_range, truncation_penalty)
+                     train_seed_range, truncation_penalty, value_h)
 from sched_env import SchedEnv
 
 
@@ -44,15 +44,38 @@ def discounted(rewards: list[float], gamma: float, scale: float) -> list[float]:
     return out[::-1]
 
 
-def run_episode(env, seed, choose, gamma, scale, trunc_penalty=1.0):
-    """Play one episode; `choose(obs, mask, prefix, expect, step)` -> (action, π)."""
+def bootstrapped(rewards: list[float], values: list[float | None], gamma: float, scale: float,
+                 n: int) -> list[float]:
+    """n-step targets: G_t = sum_{k<n} gamma^k r_{t+k}/scale + gamma^n v_{t+n},
+    v = the search value of the state n steps later (falls back to the full
+    discounted return near the end of the episode, or when no value is
+    known). Much less noisy than the full return when gamma is near 1."""
+    mc = discounted(rewards, gamma, scale)
+    if n <= 0:
+        return mc
+    T = len(rewards)
+    out = []
+    for t in range(T):
+        if t + n >= T or values[t + n] is None:
+            out.append(mc[t])
+            continue
+        g = sum(gamma ** k * rewards[t + k] / scale for k in range(n))
+        out.append(g + gamma ** n * values[t + n])
+    return out
+
+
+def run_episode(env, seed, choose, gamma, scale, trunc_penalty=1.0, n_step=0):
+    """Play one episode; `choose(obs, mask, prefix, expect, step)` -> (action, π)
+    or (action, π, search value)."""
     obs, _ = env.reset(seed=seed)
-    samples, rewards, prefix = [], [], []
+    samples, rewards, prefix, values = [], [], [], []
     raw = 0.0  # true episode return (logged), without the cut-off penalty
     done = False
     while not done:
         mask = env.action_masks()
-        a, pi = choose(obs, mask, prefix, fingerprint(env), len(prefix))
+        out = choose(obs, mask, prefix, fingerprint(env), len(prefix))
+        a, pi = out[0], out[1]
+        values.append(out[2] if len(out) > 2 else None)
         samples.append((featurize(obs), mask, pi))
         obs, r, term, trunc, info = env.step(a)
         raw += r
@@ -61,7 +84,7 @@ def run_episode(env, seed, choose, gamma, scale, trunc_penalty=1.0):
         rewards.append(r)
         prefix.append(a)
         done = term or trunc
-    rets = discounted(rewards, gamma, scale)
+    rets = bootstrapped(rewards, values, gamma, scale, n_step)
     return [(f, m, p, g) for (f, m, p), g in zip(samples, rets)], info["stats"], raw
 
 
@@ -69,7 +92,7 @@ def train_step(net, opt, batch, device, value_coef):
     feats, masks, pis, rets = zip(*batch)
     j, m, v, a = collate(list(feats), list(masks), device)
     pi = torch.as_tensor(np.stack(pis), device=device)
-    g = torch.as_tensor(np.asarray(rets, dtype=np.float32), device=device)
+    g = value_h(torch.as_tensor(np.asarray(rets, dtype=np.float32), device=device))  # net predicts h(G)
     logits, val = net(j, m, v, a)
     logp = torch.log_softmax(logits, 1).masked_fill(~a, 0.0)
     pl = -(pi * logp).sum(1).mean()
@@ -108,16 +131,19 @@ def self_play_episode(job):
     env, net = _W["env"], _W["net"]
     rng = np.random.default_rng([a["seed"], seed])
     mcts = MCTS(net, _W["env_kw"], "cpu", sims=a["sims"], gamma=a["gamma"], reward_scale=a["reward_scale"], rng=rng,
-                trunc_penalty=a["trunc_penalty"])
+                trunc_penalty=a["trunc_penalty"], batch=a["mcts_batch"])
 
     def choose(obs, mask, prefix, expect, step):
         counts = mcts.search(seed, prefix, expect, noise=True)
-        pi = counts / counts.sum()
-        act = int(rng.choice(len(pi), p=pi)) if step < a["explore_steps"] else int(np.argmax(counts))
-        return act, pi
+        act = (int(rng.choice(len(counts), p=counts / counts.sum())) if step < a["explore_steps"]
+               else int(np.argmax(counts)))
+        # policy target: visit counts sharpened by --pi-temp, so the net learns
+        # the search's choice, not just its spread (1 = plain counts)
+        c = counts ** (1.0 / a["pi_temp"])
+        return act, c / c.sum(), mcts.root_value
 
     with torch.no_grad():
-        return run_episode(env, seed, choose, a["gamma"], a["reward_scale"], a["trunc_penalty"])
+        return run_episode(env, seed, choose, a["gamma"], a["reward_scale"], a["trunc_penalty"], a["n_step"])
 
 
 def fit(net, opt, buffer, args, device, rng):
@@ -139,7 +165,7 @@ def main():
     ap.add_argument("--episodes", type=int, default=4, help="self-play episodes per iteration")
     ap.add_argument("--sims", type=int, default=32, help="MCTS simulations per move")
     ap.add_argument("--explore-steps", type=int, default=30, help="sample from π for the first N moves")
-    ap.add_argument("--bc-teacher", default="tetris_srpt", help="built-in policy to imitate first ('' = none)")
+    ap.add_argument("--bc-teacher", default="sjf", help="built-in policy to imitate first ('' = none)")
     ap.add_argument("--bc-episodes", type=int, default=40)
     ap.add_argument("--bc-epochs", type=int, default=5)
     ap.add_argument("--updates", type=int, default=50, help="gradient steps per iteration")
@@ -153,6 +179,11 @@ def main():
                     help="multiplier of the max_ticks cut-off penalty: every job still waiting is charged "
                          "(sim length + dur)/dur + 10, as if placed at the end; 0 disables")
     ap.add_argument("--reward-scale", type=float, default=10.0)
+    ap.add_argument("--n-step", type=int, default=20,
+                    help="bootstrapped value targets from the search value n moves later (0 = full return)")
+    ap.add_argument("--pi-temp", type=float, default=0.5,
+                    help="policy target = visit counts^(1/T); < 1 trains on the search's choice")
+    ap.add_argument("--mcts-batch", type=int, default=8, help="leaves per network call in MCTS (1 = unbatched)")
     ap.add_argument("--d-model", type=int, default=64)
     ap.add_argument("--layers", type=int, default=1, help="transformer encoder layers")
     ap.add_argument("--psplib", default=None,
@@ -165,6 +196,8 @@ def main():
     args = ap.parse_args()
     if args.sims < 1:
         ap.error("--sims must be >= 1")
+    if args.pi_temp <= 0:
+        ap.error("--pi-temp must be > 0")
     seeds = iter(train_seed_range(args.seed, args.bc_episodes + args.iters * args.episodes))
 
     random.seed(args.seed)

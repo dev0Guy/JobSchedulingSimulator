@@ -118,3 +118,43 @@ def test_pointer_net_shared_grid_encoder():
     assert torch.allclose(lj, lp[0, :-1].reshape(d.max_jobs, -1), atol=1e-4, equal_nan=True)
     assert torch.allclose(v, vp, atol=1e-4)
     env.close()
+
+
+def test_value_transform_round_trips():
+    from ptrmcts import value_h, value_h_inv
+    for x in [-2000.0, -15.0, -0.3, 0.0, 0.7, 40.0]:
+        assert value_h_inv(value_h(x)) == pytest.approx(x, rel=1e-4, abs=1e-4)
+    assert abs(value_h(-2000.0)) < 50  # squashed
+
+
+def test_bootstrapped_targets():
+    from train import bootstrapped, discounted
+    r, g, sc = [-1.0, -2.0, -3.0, -4.0], 0.5, 1.0
+    v = [None, 10.0, 20.0, None]
+    assert bootstrapped(r, v, g, sc, 0) == pytest.approx(discounted(r, g, sc))
+    t = bootstrapped(r, v, g, sc, 2)
+    assert t[0] == pytest.approx(-1 + 0.5 * -2 + 0.25 * 20)       # bootstraps from v[2]
+    assert t[1] == pytest.approx(discounted(r, g, sc)[1])          # v[3] unknown -> full return
+    assert t[2:] == pytest.approx(discounted(r, g, sc)[2:])        # near the end -> full return
+
+
+def test_batched_search_matches_visit_budget():
+    import torch
+    from ptrmcts import ENV_KW, MCTS, PointerNet, fingerprint
+    env = make_env()
+    env.reset(seed=1)
+    prefix = []
+    for _ in range(30):
+        m = env.action_masks()
+        a = int(np.flatnonzero(m)[0])
+        env.step(a)
+        prefix.append(a)
+    net = PointerNet.for_env(env).eval()
+    for b in (1, 5, 8):
+        mc = MCTS(net, ENV_KW, sims=21, batch=b)
+        with torch.no_grad():
+            c = mc.search(1, prefix, fingerprint(env), noise=True)
+        assert c.sum() == 21                                 # every simulation counted once
+        assert (c[~env.action_masks()] == 0).all()           # only legal actions
+        assert np.isfinite(mc.root_value)
+    env.close()

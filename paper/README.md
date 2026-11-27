@@ -47,16 +47,23 @@ Illegal actions are masked out. The action order matches `SchedEnv`.
 MCTS is PUCT in the AlphaZero style:
 - the network gives the prior and evaluates leaves;
 - Q values are min-max normalized (as in MuZero);
-- Dirichlet noise is added at the root during training.
+- Dirichlet noise is added at the root during training;
+- leaves are evaluated in batches (`--mcts-batch`, default 8): virtual loss
+  sends the simulations of one batch down different paths, and the network
+  runs once per batch, on the occupied job slots only (~5x faster than one
+  full call per leaf).
 
 The engine cannot be cloned. Each simulation therefore restores the root state with `reset(seed)` and replays the actions taken so far. Every restore checks that the replayed state matches the recorded one, so this relies on, and continuously verifies, that the engine is deterministic for a given seed.
 
 ## Training
 
-1. Imitate `tetris_srpt` for 40 episodes.
+1. Imitate `sjf` for 40 episodes (`--bc-teacher`).
 2. Repeat:
-   - play self-play episodes, sampling from the visit distribution π for the first 30 moves and choosing greedily after that;
-   - train on `CE(π) + 0.5·Huber(value, discounted return / 10)`.
+   - play self-play episodes, sampling from the visit distribution for the first 30 moves and choosing greedily after that;
+   - policy target π = visit counts^(1/T), `--pi-temp` T = 0.5: sharper than the counts, so the network learns the search's choice;
+   - value target: n-step bootstrapped return (`--n-step` 20) from the search value 20 moves later, divided by 10;
+   - the value head predicts h(G) = sign(G)(√(|G|+1) − 1) + 0.001·G (MuZero's value transform), which keeps the loss well scaled with gamma 0.999 and cut-off penalties;
+   - train on `CE(π) + 0.5·Huber(value, h(target))`.
 
 All randomness is seeded from `--seed`. Training episode e uses seed `seed·10⁶ + e`.
 

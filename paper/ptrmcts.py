@@ -211,11 +211,64 @@ class PointerNet(nn.Module):
         return cls(d.n_res, d.n_ticks, **kw)
 
 
+# Value transform (MuZero, Pohlen et al. 2018): the value head predicts
+# h(G) instead of the return G. With gamma near 1 returns span a wide range
+# (and cut-off penalties are large); h squashes them so the value loss stays
+# well scaled. evaluate_* undo it, so callers always see returns.
+VALUE_EPS = 1e-3
+
+
+def value_h(x):
+    if isinstance(x, torch.Tensor):
+        return torch.sign(x) * (torch.sqrt(x.abs() + 1) - 1) + VALUE_EPS * x
+    return math.copysign(math.sqrt(abs(x) + 1) - 1, x) + VALUE_EPS * x
+
+
+def value_h_inv(y: float) -> float:
+    e = VALUE_EPS
+    return math.copysign(((math.sqrt(1 + 4 * e * (abs(y) + 1 + e)) - 1) / (2 * e)) ** 2 - 1, y)
+
+
 @torch.no_grad()
+def evaluate_batch(net: PointerNet, obs_list: list[dict], masks: list[np.ndarray], device
+                   ) -> list[tuple[np.ndarray, float]]:
+    """Prior probabilities over actions and value (a return, h undone) for
+    several states in one forward pass.
+
+    Each state keeps only its occupied job slots (empty slots are masked out
+    of attention anyway, so the result is the same), padded to the largest
+    count in the batch; probabilities are scattered back to the full action
+    space. Fewer tokens and one call per batch: much faster than one full
+    call per state."""
+    feats = [featurize(o) for o in obs_list]
+    J, M = len(feats[0]["valid"]), len(feats[0]["mach"])
+    keeps = [np.flatnonzero(f["valid"]) for f in feats]
+    K = max(1, max(len(k) for k in keeps))  # >= 1 token so attention has a key
+    Fj = feats[0]["jobs"].shape[1]
+    subs, sub_masks = [], []
+    for f, k, mk in zip(feats, keeps, masks):
+        jobs = np.zeros((K, Fj), np.float32)
+        jobs[:len(k)] = f["jobs"][k]
+        valid = np.zeros(K, bool)
+        valid[:len(k)] = True
+        pm = np.zeros((K, M), bool)
+        pm[:len(k)] = mk[:-1].reshape(J, M)[k]
+        subs.append({"jobs": jobs, "mach": f["mach"], "valid": valid})
+        sub_masks.append(np.concatenate([pm.ravel(), mk[-1:]]))
+    logits, v = net(*collate(subs, sub_masks, device))
+    p = torch.softmax(logits, 1).cpu().numpy()
+    out = []
+    for i, (k, mk) in enumerate(zip(keeps, masks)):
+        full = np.zeros(len(mk), dtype=np.float32)
+        full[:-1].reshape(J, M)[k] = p[i, :-1].reshape(K, M)[:len(k)]
+        full[-1] = p[i, -1]
+        out.append((full, value_h_inv(float(v[i]))))
+    return out
+
+
 def evaluate_net(net: PointerNet, obs: dict, mask: np.ndarray, device) -> tuple[np.ndarray, float]:
-    """Prior probabilities over actions and value for one state."""
-    logits, v = net(*collate([featurize(obs)], [mask], device))
-    return torch.softmax(logits[0], 0).cpu().numpy(), float(v[0])
+    """Prior probabilities over actions and value (a return) for one state."""
+    return evaluate_batch(net, [obs], [mask], device)[0]
 
 
 # ----------------------------------------------------------------------------- replay
@@ -284,6 +337,7 @@ class Node:
     terminal: bool = False
     n: int = 0
     w: float = 0.0
+    vl: int = 0                  # virtual visits of simulations still waiting for their leaf value
     children: dict[int, "Node"] = field(default_factory=dict)
 
     @property
@@ -313,64 +367,98 @@ class MCTS:
     def __init__(self, net: PointerNet, env_kw: dict, device="cpu", sims: int = 32, c_puct: float = 1.5,
                  gamma: float = 0.999, reward_scale: float = 10.0, dirichlet: float = 0.3,
                  noise_frac: float = 0.25, rng: np.random.Generator | None = None,
-                 trunc_penalty: float = 1.0):
+                 trunc_penalty: float = 1.0, batch: int = 8):
         """`env_kw`: the exact SchedEnv config of the episodes searched (required:
-        the search replays them on its own engine)."""
+        the search replays them on its own engine). `batch`: leaves evaluated
+        per network call (virtual loss spreads one batch over different
+        leaves); 1 = classic one-at-a-time search."""
         if sims < 1:
             raise ValueError("MCTS needs sims >= 1")
         self.net, self.device = net, device
         self.sims, self.c, self.gamma, self.scale = sims, c_puct, gamma, reward_scale
         self.dirichlet, self.noise_frac = dirichlet, noise_frac
         self.trunc_penalty = trunc_penalty
+        self.batch = max(1, batch)
+        self.root_value = 0.0  # search value of the last root (a return), for bootstrapped targets
         self.rng = rng or np.random.default_rng(0)
         self.rp = Replayer(env_kw)
 
-    def _expand(self, node: Node) -> float:
-        env = self.rp.env
-        obs, mask = env._obs(), env.action_masks()
-        p, v = evaluate_net(self.net, obs, mask, self.device)
+    def _children(self, node: Node, p: np.ndarray, mask: np.ndarray) -> None:
         for a in np.flatnonzero(mask):
             node.children[int(a)] = Node(prior=float(p[a]))
-        return v
 
     def _select(self, node: Node, mm: MinMax) -> tuple[int, Node]:
-        sq = math.sqrt(max(1, node.n))
+        sq = math.sqrt(max(1, node.n + node.vl))
         best, best_s = None, -math.inf
         for a, ch in node.children.items():
             q = mm.norm(ch.reward / self.scale + self.gamma * ch.q()) if ch.n else 0.0
-            s = q + self.c * ch.prior * sq / (1 + ch.n)
+            s = q + self.c * ch.prior * sq / (1 + ch.n + ch.vl)
             if s > best_s:
                 best, best_s = (a, ch), s
         return best
 
+    def _backup(self, path: list[Node], g: float, mm: MinMax) -> None:
+        root = path[0]
+        for nd in reversed(path):
+            nd.n += 1
+            nd.vl -= 1
+            nd.w += g
+            if nd is not root:
+                mm.update(nd.reward / self.scale + self.gamma * nd.q())
+            g = nd.reward / self.scale + self.gamma * g
+
     def search(self, seed: int, prefix: list[int], expect: tuple, noise: bool) -> np.ndarray:
-        """Visit counts over actions at the state reached by `prefix`."""
+        """Visit counts over actions at the state reached by `prefix`.
+        Also sets `root_value` (mean search return at the root)."""
         root = Node(prior=1.0)
         mm = MinMax()
+        env = self.rp.env
         self.rp.restore(seed, prefix, expect)
-        self._expand(root)
+        mask = env.action_masks()
+        p, _ = evaluate_net(self.net, env._obs(), mask, self.device)
+        self._children(root, p, mask)
         if noise and len(root.children) > 1:
             eta = self.rng.dirichlet([self.dirichlet] * len(root.children))
             for e, ch in zip(eta, root.children.values()):
                 ch.prior = (1 - self.noise_frac) * ch.prior + self.noise_frac * e
-        for _ in range(self.sims):
-            self.rp.restore(seed, prefix)
-            node, path = root, [root]
-            while node.expanded and not node.terminal:
-                a, node = self._select(node, mm)
-                r, done, cut = self.rp.step(a)
-                if cut and self.trunc_penalty:
-                    r += truncation_penalty(self.rp.env, self.trunc_penalty)
-                node.reward, node.terminal = r, done
-                path.append(node)
-            g = 0.0 if node.terminal else self._expand(node)
-            for nd in reversed(path):
-                nd.n += 1
-                nd.w += g
-                if nd is not root:
-                    mm.update(nd.reward / self.scale + self.gamma * nd.q())
-                g = nd.reward / self.scale + self.gamma * g
-        counts = np.zeros(self.rp.env.dims.n_actions, dtype=np.float32)
+        done_sims = 0
+        while done_sims < self.sims:
+            k = min(self.batch, self.sims - done_sims)
+            done_sims += k
+            leaves: list[tuple[list[Node], Node]] = []    # to evaluate
+            obs, masks, waiting = [], [], {}            # waiting: id(leaf) -> index in leaves
+            later: list[tuple[list[Node], int]] = []    # paths ending at a leaf already in this batch
+            for _ in range(k):
+                self.rp.restore(seed, prefix)
+                node, path = root, [root]
+                root.vl += 1
+                while node.expanded and not node.terminal and id(node) not in waiting:
+                    a, node = self._select(node, mm)
+                    r, done, cut = self.rp.step(a)
+                    if cut and self.trunc_penalty:
+                        r += truncation_penalty(env, self.trunc_penalty)
+                    node.reward, node.terminal = r, done
+                    node.vl += 1
+                    path.append(node)
+                if node.terminal:
+                    self._backup(path, 0.0, mm)
+                elif id(node) in waiting:
+                    later.append((path, waiting[id(node)]))
+                else:
+                    waiting[id(node)] = len(leaves)
+                    leaves.append((path, node))
+                    m = env.action_masks()
+                    obs.append(env._obs())
+                    masks.append(m)
+            if leaves:
+                res = evaluate_batch(self.net, obs, masks, self.device)
+                for (path, leaf), (pl, v), m in zip(leaves, res, masks):
+                    self._children(leaf, pl, m)
+                    self._backup(path, v, mm)
+                for path, i in later:
+                    self._backup(path, res[i][1], mm)
+        self.root_value = root.q()
+        counts = np.zeros(env.dims.n_actions, dtype=np.float32)
         for a, ch in root.children.items():
             counts[a] = ch.n
         return counts
